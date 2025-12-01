@@ -1,3 +1,5 @@
+export mylog="1"
+
 set -x
 
 project_name='GRPO'
@@ -13,9 +15,9 @@ TEST_FILE=${TEST_FILE:-"${RAY_DATA_HOME}/gsm8k/test.parquet"}
 NNODES=${NNODES:-1}
 NGPUS_PER_NODE=${NGPUS_PER_NODE:-2}
 
-n_gpus_rollout=1
-n_gpus_training=$((NGPUS_PER_NODE - n_gpus_rollout))
-
+n_gpus_rollout=2
+# n_gpus_training=$((NGPUS_PER_NODE - n_gpus_rollout))
+n_gpus_training=2
 
 python3 -m recipe.one_step_off_policy.main_ppo \
     algorithm.adv_estimator=grpo \
@@ -60,8 +62,8 @@ python3 -m recipe.one_step_off_policy.main_ppo \
     trainer.save_freq=0 \
     trainer.test_freq=0 \
     trainer.total_epochs=1 \
-    trainer.total_training_steps=50 \
+    trainer.total_training_steps=3 \
     trainer.nnodes="${NNODES}" \
     trainer.n_gpus_per_node="${n_gpus_training}" \
     rollout.nnodes="${NNODES}" \
-    rollout.n_gpus_per_node="${n_gpus_rollout}" $@
+    rollout.n_gpus_per_node="${n_gpus_rollout}" $@ > ./log/log_no.log

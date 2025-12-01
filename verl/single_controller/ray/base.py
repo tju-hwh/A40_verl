@@ -27,6 +27,7 @@ from verl.protocol import DataProto, _padding_size_key
 from verl.single_controller.base import ClassWithInitArgs, ResourcePool, Worker, WorkerGroup
 from verl.single_controller.base.decorator import MAGIC_ATTR, Dispatch
 from verl.utils.py_functional import temp_env_var
+import os
 
 __all__ = ["Worker"]
 
@@ -442,6 +443,10 @@ class RayWorkerGroup(WorkerGroup):
             bin_pack: Whether to use strict bin packing for resource allocation
             detached: Whether workers should be detached
         """
+        if os.environ.get("mylog") == "1":
+            # ray_cls_with_init.cls may be a Ray ActorClass wrapper; fall back to str to avoid AttributeError.
+            cls_name = getattr(ray_cls_with_init.cls, "__name__", str(ray_cls_with_init.cls))
+            print(f"[mylog _init_with_resource_pool] roles_class={cls_name}")
         self.resource_pool = resource_pool
 
         strategy = "PACK"
@@ -471,7 +476,10 @@ class RayWorkerGroup(WorkerGroup):
                     worker_env=worker_env,
                     detached=detached,
                 )
-
+        if os.environ.get("mylog") == "1":
+            cls_name = getattr(ray_cls_with_init.cls, "__name__", str(ray_cls_with_init.cls))
+            print(f"[mylog _init_with_resource_pool] roles_class={cls_name} success")
+        
     def _init_with_subresource_pool(self, resource_pool, ray_cls_with_init, bin_pack, detached, worker_env=None):
         """Initialize the worker group by creating new workers from a resource pool or sub resource pool.
         Args:

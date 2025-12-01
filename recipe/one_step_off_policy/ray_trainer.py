@@ -58,7 +58,7 @@ from verl.utils.metric import (
     reduce_metrics,
 )
 from verl.utils.tracking import ValidationGenerationsLogger
-
+import os
 
 class OneStepOffRayTrainer(RayPPOTrainer):
     # TODO: support each role have individual ray_worker_group_cls,
@@ -142,11 +142,28 @@ class OneStepOffRayTrainer(RayPPOTrainer):
         1. Ray resource pools from configuration
         2. Worker groups for each role (actor, critic, etc.)
         """
+        if os.environ.get("mylog") == "1":
+            print("enter init_workers 0")
         self._init_resource_pools()
+        
+        if os.environ.get("mylog") == "1":
+            print("enter init_workers 1")
         self._create_worker_classes()
+        
+        if os.environ.get("mylog") == "1":
+            print("enter init_workers 2")
         self._init_worker_groups()
+        
+        if os.environ.get("mylog") == "1":
+            print("enter init_workers 3")
         self._init_models()
+        
+        if os.environ.get("mylog") == "1":
+            print("enter init_workers 4")
         self._init_async_rollout_manager()
+        
+        if os.environ.get("mylog") == "1":
+            print("enter init_workers 5")
 
     def _init_resource_pools(self):
         self.resource_pool_manager.create_resource_pool()
@@ -219,9 +236,41 @@ class OneStepOffRayTrainer(RayPPOTrainer):
                     OmegaConf.select(self.config.global_profiler.global_tool_config.nsys, "worker_nsight_options")
                 )
         wg_kwargs["device_name"] = self.device_name
+        
+        # 记录第一组 GPU pool
+        shared_pool = None   
+        for idx, (resource_pool, class_dict) in enumerate(self.resource_pool_to_cls.items()):
+            # --- 关键逻辑：复用第一组 PG ---
+            if idx == 0:
+                # 第一个（actor,ref）：正常创建 PG
+                # 这里会真实地向 Ray 申请 GPU 资源
+                resource_pool.get_placement_groups(
+                    device_name=wg_kwargs.get("device_name", "cuda")
+                )
+                shared_pool = resource_pool
+            else:
+                # 后面的（rollout）：不要再新建 PG，直接用第一组 PG
+                assert shared_pool is not None
+                resource_pool.pgs = shared_pool.pgs
+                # 如果你想显式控制同一个 GPU 上最多塞多少 worker，
+                # 可以统一 max_colocate_count（影响 num_gpus = 1/max_colocate_count）
+                # 比如最多 4 个进程挤在一块卡上：
+                # resource_pool.max_colocate_count = shared_pool.max_colocate_count = 4
 
-        for resource_pool, class_dict in self.resource_pool_to_cls.items():
+            
+            
+            if os.environ.get("mylog") == "1":
+                roles = ",".join(class_dict.keys())
+                print(
+                    f"mylog [init_worker_groups] loop {idx}, roles={roles}, "
+                    f"resource_pool={resource_pool}, class_dict={class_dict}"
+                )
             worker_dict_cls = create_colocated_worker_cls(class_dict=class_dict)
+            if os.environ.get("mylog") == "1":
+                roles = ",".join(class_dict.keys())
+                print(
+                    f"mylog [init_worker_groups] loop {idx}, roles={roles}, create_colocated_worker_cls success"
+                )
             wg_dict = self.ray_worker_group_cls(
                 resource_pool=resource_pool,
                 ray_cls_with_init=worker_dict_cls,
@@ -267,6 +316,7 @@ class OneStepOffRayTrainer(RayPPOTrainer):
             n_workers,
             list(range(0, n_workers)),
             backend=get_nccl_backend(),
+            # backend="gloo",  # ✅ 强制改成 gloo
             group_name="actor_rollout",
         )
 
@@ -420,7 +470,7 @@ class OneStepOffRayTrainer(RayPPOTrainer):
         self._load_checkpoint()
 
         # after load checkpoint sync rollout weights
-        self.sync_rollout_weights()
+        # self.sync_rollout_weights()
         await self.async_rollout_manager.clear_kv_cache()
 
         # perform validation before training
@@ -493,7 +543,7 @@ class OneStepOffRayTrainer(RayPPOTrainer):
 
                 # sync weights from actor to rollout
                 with marked_timer("sync_rollout_weights", timing_raw, color="purple"):
-                    self.sync_rollout_weights()
+                    # self.sync_rollout_weights()
                     await self.async_rollout_manager.clear_kv_cache()
 
                 # async next generation

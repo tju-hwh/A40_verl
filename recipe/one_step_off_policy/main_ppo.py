@@ -126,6 +126,11 @@ def create_role_worker_mapping(config):
     if config.algorithm.use_kl_in_reward or config.actor_rollout_ref.actor.use_kl_loss:
         role_worker_mapping[Role.RefPolicy] = ray.remote(DetachActorWorker)
 
+    if os.environ.get("mylog") == "1":
+        for role, worker in role_worker_mapping.items():
+            print(f"[mylog: role_worker_mapping] role={role} -> worker={worker}")
+        print(f"[mylog: ray_worker_group_cls] {ray_worker_group_cls}")
+
     return role_worker_mapping, ray_worker_group_cls
 
 
