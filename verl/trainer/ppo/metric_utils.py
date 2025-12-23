@@ -298,7 +298,7 @@ def compute_throughout_metrics(batch: DataProto, timing_raw: dict[str, float], n
     return {
         "perf/total_num_tokens": total_num_tokens,
         "perf/time_per_step": time,
-        "perf/throughput": total_num_tokens / (time * n_gpus),
+        "perf/throughput": total_num_tokens / (time * n_gpus / 2),
     }
 
 
