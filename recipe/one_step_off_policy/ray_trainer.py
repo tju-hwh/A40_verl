@@ -238,38 +238,35 @@ class OneStepOffRayTrainer(RayPPOTrainer):
         wg_kwargs["device_name"] = self.device_name
         
         # 记录第一组 GPU pool
-        shared_pool = None   
-        for idx, (resource_pool, class_dict) in enumerate(self.resource_pool_to_cls.items()):
+        # shared_pool = None   
+        # for idx, (resource_pool, class_dict) in enumerate(self.resource_pool_to_cls.items()):
             # --- 关键逻辑：复用第一组 PG ---
-            if idx == 0:
-                # 第一个（actor,ref）：正常创建 PG
-                # 这里会真实地向 Ray 申请 GPU 资源
-                resource_pool.get_placement_groups(
-                    device_name=wg_kwargs.get("device_name", "cuda")
-                )
-                shared_pool = resource_pool
-            else:
-                # 后面的（rollout）：不要再新建 PG，直接用第一组 PG
-                assert shared_pool is not None
-                resource_pool.pgs = shared_pool.pgs
-                # 如果你想显式控制同一个 GPU 上最多塞多少 worker，
-                # 可以统一 max_colocate_count（影响 num_gpus = 1/max_colocate_count）
-                # 比如最多 4 个进程挤在一块卡上：
-                # resource_pool.max_colocate_count = shared_pool.max_colocate_count = 4
+            # if idx == 0:
+            #     # 第一个（actor,ref）：正常创建 PG
+            #     # 这里会真实地向 Ray 申请 GPU 资源
+            #     resource_pool.get_placement_groups(
+            #         device_name=wg_kwargs.get("device_name", "cuda")
+            #     )
+            #     shared_pool = resource_pool
+            # else:
+            #     # 后面的（rollout）：不要再新建 PG，直接用第一组 PG
+            #     assert shared_pool is not None
+            #     resource_pool.pgs = shared_pool.pgs
 
-            
+
+        for resource_pool, class_dict in self.resource_pool_to_cls.items():    
             
             if os.environ.get("mylog") == "1":
                 roles = ",".join(class_dict.keys())
                 print(
-                    f"mylog [init_worker_groups] loop {idx}, roles={roles}, "
+                    f"mylog [init_worker_groups] loop , roles={roles}, "
                     f"resource_pool={resource_pool}, class_dict={class_dict}"
                 )
             worker_dict_cls = create_colocated_worker_cls(class_dict=class_dict)
             if os.environ.get("mylog") == "1":
                 roles = ",".join(class_dict.keys())
                 print(
-                    f"mylog [init_worker_groups] loop {idx}, roles={roles}, create_colocated_worker_cls success"
+                    f"mylog [init_worker_groups] loop , roles={roles}, create_colocated_worker_cls success"
                 )
             wg_dict = self.ray_worker_group_cls(
                 resource_pool=resource_pool,

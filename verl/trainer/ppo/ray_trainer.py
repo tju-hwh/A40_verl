@@ -114,7 +114,7 @@ class ResourcePoolManager:
         )
         if total_available_gpus < total_required_gpus:
             # 取消gpu数量检查
-            return
+            # return
             raise ValueError(
                 f"Total available GPUs {total_available_gpus} is less than total desired GPUs {total_required_gpus}"
             )
