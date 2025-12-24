@@ -375,15 +375,42 @@ class AgentLoopWorkerBase:
         )
 
         tasks = []
+        task_map = {}
         for i in range(len(batch)):
             trace_this_sample = i in traced_indices
             kwargs = {k: v[i] for k, v in batch.non_tensor_batch.items()}
-            tasks.append(
-                asyncio.create_task(
-                    self._run_agent_loop(sampling_params, trajectory_info[i], trace=trace_this_sample, **kwargs)
-                )
+            task = asyncio.create_task(
+                self._run_agent_loop(sampling_params, trajectory_info[i], trace=trace_this_sample, **kwargs)
             )
-        outputs = await asyncio.gather(*tasks)
+            tasks.append(task)
+            task_map[task] = i
+
+        outputs = [None] * len(batch)
+        finished_in_group = 0
+        tokens_in_group = 0
+        mini_step = 0
+        micro_batch_size = self.config.actor_rollout_ref.actor.get("ppo_micro_batch_size_per_gpu")
+        if micro_batch_size is None:
+            micro_batch_size = self.config.actor_rollout_ref.actor.get("ppo_micro_batch_size", 1)
+        temp_o = int(self.config.trainer.n_gpus_per_node) * int(micro_batch_size or 1)
+        for task in asyncio.as_completed(tasks):
+            result = await task
+            outputs[task_map[task]] = result
+            num_tokens = result.extra_fields.get("num_tokens")
+            if num_tokens is not None:
+                tokens_in_group += int(num_tokens)
+            finished_in_group += 1
+            if temp_o > 0 and finished_in_group >= temp_o:
+                import time
+
+                current_time = time.strftime("%Y-%m-%d %H:%M:%S")
+                print(
+                    f"finish {temp_o} prompts at mini_step {mini_step}, "
+                    f"has {tokens_in_group} tokens. current time {current_time}"
+                )
+                mini_step += 1
+                finished_in_group = 0
+                tokens_in_group = 0
 
         output = self._postprocess(outputs)
 
@@ -424,6 +451,7 @@ class AgentLoopWorkerBase:
     async def _agent_loop_postprocess(self, output, **kwargs) -> _InternalAgentLoopOutput:
         """Perform post-processing operations on the output of each individual agent loop."""
         output.extra_fields["raw_prompt"] = kwargs["raw_prompt"]
+        output.extra_fields["num_tokens"] = len(output.prompt_ids) + len(output.response_ids)
 
         # Some AgentLoop may have already computed the reward score, e.g SWE-agent.
 
