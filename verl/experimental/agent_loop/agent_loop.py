@@ -37,6 +37,7 @@ from verl.protocol import DataProto
 from verl.single_controller.ray.base import RayResourcePool, RayWorkerGroup
 from verl.utils import hf_processor, hf_tokenizer
 from verl.utils.fs import copy_to_local
+from verl.utils.logger import default_logger, log_with_rank
 from verl.utils.model import compute_position_id_with_mask
 from verl.utils.rollout_trace import (
     RolloutTraceConfig,
@@ -310,7 +311,13 @@ class AgentLoopWorkerBase:
         )
 
     @tqbridge()
-    async def generate_sequences(self, batch: DataProto) -> DataProto:
+    async def generate_sequences(
+        self,
+        batch: DataProto,
+        stream_queue=None,
+        stream_group_size: int | None = None,
+        stream_end_token=None,
+    ) -> DataProto:
         """Generate sequences from agent loop.
 
         Args:
@@ -375,17 +382,18 @@ class AgentLoopWorkerBase:
         )
 
         tasks = []
-        task_map = {}
         for i in range(len(batch)):
             trace_this_sample = i in traced_indices
             kwargs = {k: v[i] for k, v in batch.non_tensor_batch.items()}
-            task = asyncio.create_task(
-                self._run_agent_loop(sampling_params, trajectory_info[i], trace=trace_this_sample, **kwargs)
-            )
+            async def _run_with_index(index, trace, kw):
+                result = await self._run_agent_loop(sampling_params, trajectory_info[index], trace=trace, **kw)
+                return index, result
+
+            task = asyncio.create_task(_run_with_index(i, trace_this_sample, kwargs))
             tasks.append(task)
-            task_map[task] = i
 
         outputs = [None] * len(batch)
+        stream_bucket = []
         finished_in_group = 0
         tokens_in_group = 0
         mini_step = 0
@@ -394,8 +402,14 @@ class AgentLoopWorkerBase:
             micro_batch_size = self.config.actor_rollout_ref.actor.get("ppo_micro_batch_size", 1)
         temp_o = int(self.config.trainer.n_gpus_per_node) * int(micro_batch_size or 1)
         for task in asyncio.as_completed(tasks):
-            result = await task
-            outputs[task_map[task]] = result
+            index, result = await task
+            outputs[index] = result
+            if stream_queue is not None and stream_group_size:
+                stream_bucket.append(result)
+                if len(stream_bucket) >= stream_group_size:
+                    stream_output = self._postprocess(stream_bucket)
+                    stream_bucket = []
+                    await asyncio.to_thread(stream_queue.put, stream_output)
             num_tokens = result.extra_fields.get("num_tokens")
             if num_tokens is not None:
                 tokens_in_group += int(num_tokens)
@@ -404,13 +418,27 @@ class AgentLoopWorkerBase:
                 import time
 
                 current_time = time.strftime("%Y-%m-%d %H:%M:%S")
-                print(
+                if torch.distributed.is_initialized():
+                    rank = torch.distributed.get_rank()
+                else:
+                    rank = 0
+                log_with_rank(
                     f"finish {temp_o} prompts at mini_step {mini_step}, "
-                    f"has {tokens_in_group} tokens. current time {current_time}"
+                    f"has {tokens_in_group} tokens. current time {current_time}",
+                    rank=rank,
+                    logger=default_logger,
+                    log_only_rank_0=True,
                 )
                 mini_step += 1
                 finished_in_group = 0
                 tokens_in_group = 0
+
+        if stream_queue is not None and stream_group_size and stream_bucket:
+            stream_output = self._postprocess(stream_bucket)
+            await asyncio.to_thread(stream_queue.put, stream_output)
+            stream_bucket = []
+        if stream_queue is not None and stream_end_token is not None:
+            await asyncio.to_thread(stream_queue.put, stream_end_token)
 
         output = self._postprocess(outputs)
 

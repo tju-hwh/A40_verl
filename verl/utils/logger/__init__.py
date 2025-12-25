@@ -13,6 +13,9 @@
 # limitations under the License.
 
 
+import logging
+import os
+
 from .aggregate_logger import (
     DecoratorLoggerBase,
     LocalLogger,
@@ -22,7 +25,18 @@ from .aggregate_logger import (
     print_with_rank_and_timer,
 )
 
+default_logger = logging.getLogger("verl")
+default_logger.setLevel(logging.INFO)
+_default_log_path = "/root/1.log"
+if not any(
+    isinstance(handler, logging.FileHandler) and os.path.abspath(handler.baseFilename) == _default_log_path
+    for handler in default_logger.handlers
+):
+    _file_handler = logging.FileHandler(_default_log_path)
+    default_logger.addHandler(_file_handler)
+
 __all__ = [
+    "default_logger",
     "LocalLogger",
     "DecoratorLoggerBase",
     "print_rank_0",

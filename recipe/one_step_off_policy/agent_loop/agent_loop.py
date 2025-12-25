@@ -54,6 +54,37 @@ class OneStepOffAgentLoopManager(AgentLoopManager):
         output.meta_info = {"timing": timing, **outputs[0].meta_info}
         return output
 
+    async def generate_sequences_async_stream(
+        self,
+        prompts: DataProto,
+        stream_queue,
+        stream_group_size: int,
+        stream_end_token=None,
+    ) -> DataProto:
+        """Split input batch and dispatch to agent loop workers (async version) with streaming output."""
+        chunkes = prompts.chunk(len(self.agent_loop_workers))
+        outputs = await asyncio.gather(
+            *[
+                asyncio.to_thread(
+                    ray.get,
+                    worker.generate_sequences.remote(
+                        chunk,
+                        stream_queue=stream_queue,
+                        stream_group_size=stream_group_size,
+                        stream_end_token=None,
+                    ),
+                )
+                for worker, chunk in zip(self.agent_loop_workers, chunkes, strict=True)
+            ]
+        )
+        output = DataProto.concat(outputs)
+        metrics = [output.meta_info.pop("metrics") for output in outputs]
+        timing = self._performance_metrics(metrics, output)
+        output.meta_info = {"timing": timing, **outputs[0].meta_info}
+        if stream_queue is not None and stream_end_token is not None:
+            await asyncio.to_thread(stream_queue.put, stream_end_token)
+        return output
+
     async def wake_up(self):
         await asyncio.gather(*[replica.wake_up() for replica in self.rollout_replicas])
 
