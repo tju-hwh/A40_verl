@@ -528,6 +528,7 @@ class DataParallelPPOActor(BasePPOActor):
 
     @GPUMemoryLogger(role="dp actor", logger=logger)
     def update_policy_stream(self, data: DataProto, zero_grad: bool = False, step_optimizer: bool = False):
+        # 流式更新：支持外部控制 zero_grad 与 step 时机
         # make sure we are in training mode
         self.actor_module.train()
 
@@ -559,6 +560,7 @@ class DataParallelPPOActor(BasePPOActor):
 
         metrics = {}
         if zero_grad:
+            # step 起始时清零梯度
             self.actor_optimizer.zero_grad()
 
         for _ in range(self.config.ppo_epochs):
@@ -654,6 +656,7 @@ class DataParallelPPOActor(BasePPOActor):
                     append_to_dict(metrics, micro_batch_metrics)
 
         if step_optimizer:
+            # step 末尾才执行一次 optimizer.step()
             grad_norm = self._optimizer_step()
             metrics["actor/grad_norm"] = grad_norm.detach().item()
             self.actor_optimizer.zero_grad()

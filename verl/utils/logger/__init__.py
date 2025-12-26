@@ -25,6 +25,7 @@ from .aggregate_logger import (
     print_with_rank_and_timer,
 )
 
+# 默认 logger，统一输出到文件
 default_logger = logging.getLogger("verl")
 default_logger.setLevel(logging.INFO)
 _default_log_path = "/root/1.log"
@@ -32,6 +33,7 @@ if not any(
     isinstance(handler, logging.FileHandler) and os.path.abspath(handler.baseFilename) == _default_log_path
     for handler in default_logger.handlers
 ):
+    # 默认输出到固定日志文件
     _file_handler = logging.FileHandler(_default_log_path)
     default_logger.addHandler(_file_handler)
 

@@ -348,6 +348,7 @@ class OneStepOffRayTrainer(RayPPOTrainer):
         return int(self.config.trainer.n_gpus_per_node) * int(micro_batch_size or 1)
 
     def _prepare_batch_for_training(self, batch: DataProto) -> tuple[DataProto, dict]:
+        # 与原 _async_gen_next_batch 中的 reward/log_prob/advantage 保持一致
         metrics = {}
 
         if "response_mask" not in batch.batch.keys():
@@ -434,6 +435,7 @@ class OneStepOffRayTrainer(RayPPOTrainer):
         return batch, metrics
 
     async def _consume_stream_and_train(self, stream_queue: RayQueue, stream_end_token) -> tuple[dict, DataProto | None]:
+        # 按 uid 分组缓存，凑齐 rollout.n 后计算 advantage，再按 temp_o 触发训练
         temp_o = self._get_stream_group_size()
         rollout_n = self.config.actor_rollout_ref.rollout.n
         uid_buffer: dict[str, list[DataProto]] = {}
@@ -466,6 +468,7 @@ class OneStepOffRayTrainer(RayPPOTrainer):
                     train_buffer.append(prepared)
                     train_buffer_count += len(prepared)
                     if train_buffer_count > temp_o:
+                        # 超过 temp_o 就立刻训练（不切分）
                         train_batch = DataProto.concat(train_buffer)
                         train_batch.meta_info["global_token_num"] = torch.sum(
                             train_batch.batch["attention_mask"], dim=-1
@@ -483,6 +486,7 @@ class OneStepOffRayTrainer(RayPPOTrainer):
                         train_buffer_count = 0
 
         if train_buffer:
+            # step 结束时把剩余 buffer 训练并执行 optimizer.step()
             train_batch = DataProto.concat(train_buffer)
             train_batch.meta_info["global_token_num"] = torch.sum(
                 train_batch.batch["attention_mask"], dim=-1
@@ -507,6 +511,7 @@ class OneStepOffRayTrainer(RayPPOTrainer):
         return reduce_metrics(metrics_across_chunks), batch_for_metrics
 
     async def _async_gen_next_batch_stream(self, continuous_iterator, stream_queue: RayQueue, stream_end_token):
+        # 生成侧流式输出到队列，同时保留完整 batch 返回用于指标统计
         try:
             epoch, batch_dict = next(continuous_iterator)
         except StopIteration:
@@ -710,6 +715,7 @@ class OneStepOffRayTrainer(RayPPOTrainer):
         train_future = None
 
         def _start_stream_tasks():
+            # 使用 RayQueue 进行流式训练传递
             stream_queue = RayQueue()
             stream_end_token = f"__stream_end__{uuid.uuid4()}"
             batch_future = asyncio.create_task(

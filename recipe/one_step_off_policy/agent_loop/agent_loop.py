@@ -71,7 +71,7 @@ class OneStepOffAgentLoopManager(AgentLoopManager):
                         chunk,
                         stream_queue=stream_queue,
                         stream_group_size=stream_group_size,
-                        stream_end_token=None,
+                        stream_end_token=None,  # 结束符只由 manager 发出
                     ),
                 )
                 for worker, chunk in zip(self.agent_loop_workers, chunkes, strict=True)
@@ -82,6 +82,7 @@ class OneStepOffAgentLoopManager(AgentLoopManager):
         timing = self._performance_metrics(metrics, output)
         output.meta_info = {"timing": timing, **outputs[0].meta_info}
         if stream_queue is not None and stream_end_token is not None:
+            # 只发送一个结束符，避免多 worker 重复
             await asyncio.to_thread(stream_queue.put, stream_end_token)
         return output
 

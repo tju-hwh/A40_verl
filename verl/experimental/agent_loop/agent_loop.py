@@ -405,6 +405,7 @@ class AgentLoopWorkerBase:
             index, result = await task
             outputs[index] = result
             if stream_queue is not None and stream_group_size:
+                # 按 stream_group_size 聚合结果后立即推送到队列
                 stream_bucket.append(result)
                 if len(stream_bucket) >= stream_group_size:
                     stream_output = self._postprocess(stream_bucket)
@@ -423,6 +424,7 @@ class AgentLoopWorkerBase:
                 else:
                     rank = 0
                 log_with_rank(
+                    # 仅 rank 0 打印且走统一 logger
                     f"finish {temp_o} prompts at mini_step {mini_step}, "
                     f"has {tokens_in_group} tokens. current time {current_time}",
                     rank=rank,
@@ -434,10 +436,12 @@ class AgentLoopWorkerBase:
                 tokens_in_group = 0
 
         if stream_queue is not None and stream_group_size and stream_bucket:
+            # 结尾不足一组也要入队
             stream_output = self._postprocess(stream_bucket)
             await asyncio.to_thread(stream_queue.put, stream_output)
             stream_bucket = []
         if stream_queue is not None and stream_end_token is not None:
+            # 结束符交由上层统一推送
             await asyncio.to_thread(stream_queue.put, stream_end_token)
 
         output = self._postprocess(outputs)
@@ -479,6 +483,8 @@ class AgentLoopWorkerBase:
     async def _agent_loop_postprocess(self, output, **kwargs) -> _InternalAgentLoopOutput:
         """Perform post-processing operations on the output of each individual agent loop."""
         output.extra_fields["raw_prompt"] = kwargs["raw_prompt"]
+        # 记录单样本 token 数用于分组统计
+        output.extra_fields["num_tokens"] = len(output.prompt_ids) + len(output.response_ids)
         output.extra_fields["num_tokens"] = len(output.prompt_ids) + len(output.response_ids)
 
         # Some AgentLoop may have already computed the reward score, e.g SWE-agent.

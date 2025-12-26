@@ -909,6 +909,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
     @register(dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="actor"))
     @DistProfiler.annotate(color="red", role="actor_update_stream")
     def update_actor_stream(self, data: DataProto, zero_grad: bool = False, step_optimizer: bool = False):
+        # 流式 actor 更新，支持分块累计梯度
         assert self._is_actor
         if self._is_offload_param:
             load_fsdp_model_to_gpu(self.actor_module_fsdp)
