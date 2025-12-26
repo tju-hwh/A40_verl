@@ -19,6 +19,7 @@ Single Process Actor
 
 import logging
 import os
+import time
 
 import torch
 from torch import nn
@@ -26,6 +27,7 @@ from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 from torch.distributed.tensor import DTensor
 
 import verl.utils.torch_functional as verl_F
+from verl.utils.logger import default_logger, log_with_rank
 from verl import DataProto
 from verl.trainer.ppo.core_algos import agg_loss, get_policy_loss_fn, kl_penalty
 from verl.utils.attention_utils import index_first_axis, pad_input, rearrange, unpad_input
@@ -534,6 +536,8 @@ class DataParallelPPOActor(BasePPOActor):
 
         zero_grad = data.meta_info.get("stream_zero_grad", False)
         step_optimizer = data.meta_info.get("stream_step_optimizer", False)
+        stream_batch_id = data.meta_info.get("stream_batch_id", -1)
+        stream_global_steps = data.meta_info.get("stream_global_steps", -1)
 
         temperature = data.meta_info["temperature"]  # temperature must be in the data.meta_info to avoid silent error
 
@@ -566,6 +570,10 @@ class DataParallelPPOActor(BasePPOActor):
             # step 起始时清零梯度
             self.actor_optimizer.zero_grad()
 
+        # 前向开始日志（按 batch 级别）
+        forward_logged = False
+        backward_logged = False
+
         for _ in range(self.config.ppo_epochs):
             for mini_batch in mini_batches:
                 if self.config.use_dynamic_bsz:
@@ -578,6 +586,18 @@ class DataParallelPPOActor(BasePPOActor):
                     micro_batches = mini_batch.split(self.config.ppo_micro_batch_size_per_gpu)
 
                 for micro_batch in micro_batches:
+                    if not forward_logged:
+                        # 记录前向开始时间
+                        now = time.time()
+                        rank = torch.distributed.get_rank()
+                        log_with_rank(
+                            f"global_steps={stream_global_steps} b_id={stream_batch_id} forward_start={now}",
+                            rank=rank,
+                            logger=default_logger,
+                            log_only_rank_0=True,
+                        )
+                        forward_logged = True
+
                     micro_batch = micro_batch.to(get_device_id())
                     micro_batch_metrics = {}
                     model_inputs = {**micro_batch.batch, **micro_batch.non_tensor_batch}
@@ -650,6 +670,18 @@ class DataParallelPPOActor(BasePPOActor):
                         micro_batch_metrics["actor/kl_coef"] = self.config.kl_loss_coef
 
                     loss = policy_loss * loss_scale_factor
+                    if not backward_logged:
+                        # 记录反向开始时间
+                        now = time.time()
+                        rank = torch.distributed.get_rank()
+                        log_with_rank(
+                            f"global_steps={stream_global_steps} b_id={stream_batch_id} backward_start={now}",
+                            rank=rank,
+                            logger=default_logger,
+                            log_only_rank_0=True,
+                        )
+                        backward_logged = True
+
                     if self.scaler is not None:
                         self.scaler.scale(loss).backward()
                     else:
@@ -663,4 +695,14 @@ class DataParallelPPOActor(BasePPOActor):
             grad_norm = self._optimizer_step()
             metrics["actor/grad_norm"] = grad_norm.detach().item()
             self.actor_optimizer.zero_grad()
+
+        # 记录反向结束时间
+        now = time.time()
+        rank = torch.distributed.get_rank()
+        log_with_rank(
+            f"global_steps={stream_global_steps} b_id={stream_batch_id} backward_end={now}",
+            rank=rank,
+            logger=default_logger,
+            log_only_rank_0=True,
+        )
         return metrics

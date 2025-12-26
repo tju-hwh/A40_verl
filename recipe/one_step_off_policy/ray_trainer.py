@@ -444,6 +444,7 @@ class OneStepOffRayTrainer(RayPPOTrainer):
         metrics_across_chunks: dict[str, list] = {}
         train_buffer_count = 0
         zero_grad = True
+        b_id_counter = 0
 
         while True:
             item = await asyncio.to_thread(stream_queue.get)
@@ -477,6 +478,10 @@ class OneStepOffRayTrainer(RayPPOTrainer):
                         train_batch.meta_info["temperature"] = self.config.actor_rollout_ref.rollout.temperature
                         train_batch.meta_info["stream_zero_grad"] = zero_grad
                         train_batch.meta_info["stream_step_optimizer"] = False
+                        # 记录当前训练 batch 的编号与步数
+                        train_batch.meta_info["stream_batch_id"] = b_id_counter
+                        train_batch.meta_info["stream_global_steps"] = self.global_steps
+                        b_id_counter += 1
                         actor_output = self.actor_rollout_wg.update_actor_stream(train_batch)
                         reduced = reduce_metrics(actor_output.meta_info["metrics"])
                         for key, value in reduced.items():
@@ -495,6 +500,10 @@ class OneStepOffRayTrainer(RayPPOTrainer):
             train_batch.meta_info["temperature"] = self.config.actor_rollout_ref.rollout.temperature
             train_batch.meta_info["stream_zero_grad"] = zero_grad
             train_batch.meta_info["stream_step_optimizer"] = True
+            # 记录当前训练 batch 的编号与步数
+            train_batch.meta_info["stream_batch_id"] = b_id_counter
+            train_batch.meta_info["stream_global_steps"] = self.global_steps
+            b_id_counter += 1
             actor_output = self.actor_rollout_wg.update_actor_stream(train_batch)
             reduced = reduce_metrics(actor_output.meta_info["metrics"])
             for key, value in reduced.items():
