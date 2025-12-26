@@ -908,7 +908,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
 
     @register(dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="actor"))
     @DistProfiler.annotate(color="red", role="actor_update_stream")
-    def update_actor_stream(self, data: DataProto, zero_grad: bool = False, step_optimizer: bool = False):
+    def update_actor_stream(self, data: DataProto):
         # 流式 actor 更新，支持分块累计梯度
         assert self._is_actor
         if self._is_offload_param:
@@ -920,9 +920,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             data = data.to("cpu")
 
             with Timer(name="update_policy_stream", logger=None) as timer:
-                metrics = self.actor.update_policy_stream(
-                    data=data, zero_grad=zero_grad, step_optimizer=step_optimizer
-                )
+                metrics = self.actor.update_policy_stream(data=data)
             delta_time = timer.last
             global_num_tokens = data.meta_info["global_token_num"]
             estimated_flops, promised_flops = self.flops_counter.estimate_flops(global_num_tokens, delta_time)
@@ -931,7 +929,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             metrics["perf/max_memory_reserved_gb"] = get_torch_device().max_memory_reserved() / (1024**3)
             metrics["perf/cpu_memory_used_gb"] = psutil.virtual_memory().used / (1024**3)
 
-            if step_optimizer:
+            if data.meta_info.get("stream_step_optimizer", False):
                 lr = self.actor_lr_scheduler.get_last_lr()[0]
                 metrics["actor/lr"] = lr.item() if torch.is_tensor(lr) else lr
                 self.actor_lr_scheduler.step()

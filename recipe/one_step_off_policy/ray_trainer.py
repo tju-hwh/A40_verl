@@ -475,9 +475,9 @@ class OneStepOffRayTrainer(RayPPOTrainer):
                         ).tolist()
                         train_batch.meta_info["multi_turn"] = self.config.actor_rollout_ref.rollout.multi_turn.enable
                         train_batch.meta_info["temperature"] = self.config.actor_rollout_ref.rollout.temperature
-                        actor_output = self.actor_rollout_wg.update_actor_stream(
-                            train_batch, zero_grad=zero_grad, step_optimizer=False
-                        )
+                        train_batch.meta_info["stream_zero_grad"] = zero_grad
+                        train_batch.meta_info["stream_step_optimizer"] = False
+                        actor_output = self.actor_rollout_wg.update_actor_stream(train_batch)
                         reduced = reduce_metrics(actor_output.meta_info["metrics"])
                         for key, value in reduced.items():
                             metrics_across_chunks.setdefault(key, []).append(value)
@@ -493,9 +493,9 @@ class OneStepOffRayTrainer(RayPPOTrainer):
             ).tolist()
             train_batch.meta_info["multi_turn"] = self.config.actor_rollout_ref.rollout.multi_turn.enable
             train_batch.meta_info["temperature"] = self.config.actor_rollout_ref.rollout.temperature
-            actor_output = self.actor_rollout_wg.update_actor_stream(
-                train_batch, zero_grad=zero_grad, step_optimizer=True
-            )
+            train_batch.meta_info["stream_zero_grad"] = zero_grad
+            train_batch.meta_info["stream_step_optimizer"] = True
+            actor_output = self.actor_rollout_wg.update_actor_stream(train_batch)
             reduced = reduce_metrics(actor_output.meta_info["metrics"])
             for key, value in reduced.items():
                 metrics_across_chunks.setdefault(key, []).append(value)

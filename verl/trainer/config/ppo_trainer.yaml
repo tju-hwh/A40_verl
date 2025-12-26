@@ -208,6 +208,9 @@ trainer:
   #  mode: "auto", "enable", or "disable"
   use_legacy_worker_impl: auto
 
+  # whether to enable streaming training (actor only)
+  stream_train: False
+
 # profiler configs
 global_profiler:
 

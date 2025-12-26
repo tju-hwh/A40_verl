@@ -485,6 +485,9 @@ class AgentLoopWorkerBase:
         output.extra_fields["raw_prompt"] = kwargs["raw_prompt"]
         # 记录单样本 token 数用于分组统计
         output.extra_fields["num_tokens"] = len(output.prompt_ids) + len(output.response_ids)
+        if "uid" in kwargs:
+            # 保留 uid 用于下游按 uid 分组
+            output.extra_fields["uid"] = kwargs["uid"]
         output.extra_fields["num_tokens"] = len(output.prompt_ids) + len(output.response_ids)
 
         # Some AgentLoop may have already computed the reward score, e.g SWE-agent.

@@ -527,10 +527,13 @@ class DataParallelPPOActor(BasePPOActor):
         return metrics
 
     @GPUMemoryLogger(role="dp actor", logger=logger)
-    def update_policy_stream(self, data: DataProto, zero_grad: bool = False, step_optimizer: bool = False):
+    def update_policy_stream(self, data: DataProto):
         # 流式更新：支持外部控制 zero_grad 与 step 时机
         # make sure we are in training mode
         self.actor_module.train()
+
+        zero_grad = data.meta_info.get("stream_zero_grad", False)
+        step_optimizer = data.meta_info.get("stream_step_optimizer", False)
 
         temperature = data.meta_info["temperature"]  # temperature must be in the data.meta_info to avoid silent error
 
