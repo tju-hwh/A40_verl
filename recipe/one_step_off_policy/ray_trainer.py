@@ -467,7 +467,8 @@ class OneStepOffRayTrainer(RayPPOTrainer):
                         # 达到 temp_o 才统一计算 reward/logprob/advantage 并训练
                         train_batch_raw = DataProto.concat(train_buffer)
                         prepared, prep_metrics = self._prepare_batch_for_training(train_batch_raw)
-                        processed_batches.append(prepared)
+                        # 复制一份用于指标，避免后续写入 meta_info 引发冲突
+                        processed_batches.append(prepared.select(deepcopy=True))
                         for key, value in prep_metrics.items():
                             metrics_across_chunks.setdefault(key, []).append(value)
 
@@ -494,7 +495,8 @@ class OneStepOffRayTrainer(RayPPOTrainer):
             # step 结束时把剩余 buffer 统一计算并执行 optimizer.step()
             train_batch_raw = DataProto.concat(train_buffer)
             prepared, prep_metrics = self._prepare_batch_for_training(train_batch_raw)
-            processed_batches.append(prepared)
+            # 复制一份用于指标，避免后续写入 meta_info 引发冲突
+            processed_batches.append(prepared.select(deepcopy=True))
             for key, value in prep_metrics.items():
                 metrics_across_chunks.setdefault(key, []).append(value)
 
@@ -741,6 +743,7 @@ class OneStepOffRayTrainer(RayPPOTrainer):
         # Start the first asynchronous generation task.
         if stream_train:
             batch_data_future, train_future = _start_stream_tasks()
+            self.global_steps += 1           
         else:
             batch_data_future = asyncio.create_task(self._async_gen_next_batch(continuous_iterator))
 
