@@ -66,6 +66,7 @@ python3 -m recipe.one_step_off_policy.main_ppo \
     trainer.total_epochs=1 \
     trainer.total_training_steps=20 \
     trainer.nnodes="${NNODES}" \
+    trainer.stream_train=True \
     trainer.n_gpus_per_node="${n_gpus_training}" \
     rollout.nnodes="${NNODES}" \
     rollout.n_gpus_per_node="${n_gpus_rollout}" $@ > ./log/log_no_3.log

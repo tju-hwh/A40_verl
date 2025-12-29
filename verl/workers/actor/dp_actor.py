@@ -588,7 +588,7 @@ class DataParallelPPOActor(BasePPOActor):
                 for micro_batch in micro_batches:
                     if not forward_logged:
                         # 记录前向开始时间
-                        now = time.time()
+                        now = time.strftime("%Y-%m-%d %H:%M:%S")
                         rank = torch.distributed.get_rank()
                         log_with_rank(
                             f"global_steps={stream_global_steps} b_id={stream_batch_id} forward_start={now}",
@@ -672,7 +672,7 @@ class DataParallelPPOActor(BasePPOActor):
                     loss = policy_loss * loss_scale_factor
                     if not backward_logged:
                         # 记录反向开始时间
-                        now = time.time()
+                        now = time.strftime("%Y-%m-%d %H:%M:%S")
                         rank = torch.distributed.get_rank()
                         log_with_rank(
                             f"global_steps={stream_global_steps} b_id={stream_batch_id} backward_start={now}",
@@ -697,7 +697,7 @@ class DataParallelPPOActor(BasePPOActor):
             self.actor_optimizer.zero_grad()
 
         # 记录反向结束时间
-        now = time.time()
+        now = time.strftime("%Y-%m-%d %H:%M:%S")
         rank = torch.distributed.get_rank()
         log_with_rank(
             f"global_steps={stream_global_steps} b_id={stream_batch_id} backward_end={now}",

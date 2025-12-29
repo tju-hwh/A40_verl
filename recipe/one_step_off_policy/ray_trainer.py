@@ -461,28 +461,28 @@ class OneStepOffRayTrainer(RayPPOTrainer):
                     group_batch = DataProto.concat(uid_list)
                     uid_buffer.pop(uid, None)
 
-                    prepared, prep_metrics = self._prepare_batch_for_training(group_batch)
-                    processed_batches.append(prepared)
-                    for key, value in prep_metrics.items():
-                        metrics_across_chunks.setdefault(key, []).append(value)
+                    train_buffer.append(group_batch)
+                    train_buffer_count += len(group_batch)
+                    if train_buffer_count >= temp_o:
+                        # 达到 temp_o 才统一计算 reward/logprob/advantage 并训练
+                        train_batch_raw = DataProto.concat(train_buffer)
+                        prepared, prep_metrics = self._prepare_batch_for_training(train_batch_raw)
+                        processed_batches.append(prepared)
+                        for key, value in prep_metrics.items():
+                            metrics_across_chunks.setdefault(key, []).append(value)
 
-                    train_buffer.append(prepared)
-                    train_buffer_count += len(prepared)
-                    if train_buffer_count > temp_o:
-                        # 超过 temp_o 就立刻训练（不切分）
-                        train_batch = DataProto.concat(train_buffer)
-                        train_batch.meta_info["global_token_num"] = torch.sum(
-                            train_batch.batch["attention_mask"], dim=-1
+                        prepared.meta_info["global_token_num"] = torch.sum(
+                            prepared.batch["attention_mask"], dim=-1
                         ).tolist()
-                        train_batch.meta_info["multi_turn"] = self.config.actor_rollout_ref.rollout.multi_turn.enable
-                        train_batch.meta_info["temperature"] = self.config.actor_rollout_ref.rollout.temperature
-                        train_batch.meta_info["stream_zero_grad"] = zero_grad
-                        train_batch.meta_info["stream_step_optimizer"] = False
+                        prepared.meta_info["multi_turn"] = self.config.actor_rollout_ref.rollout.multi_turn.enable
+                        prepared.meta_info["temperature"] = self.config.actor_rollout_ref.rollout.temperature
+                        prepared.meta_info["stream_zero_grad"] = zero_grad
+                        prepared.meta_info["stream_step_optimizer"] = False
                         # 记录当前训练 batch 的编号与步数
-                        train_batch.meta_info["stream_batch_id"] = b_id_counter
-                        train_batch.meta_info["stream_global_steps"] = self.global_steps
+                        prepared.meta_info["stream_batch_id"] = b_id_counter
+                        prepared.meta_info["stream_global_steps"] = self.global_steps
                         b_id_counter += 1
-                        actor_output = self.actor_rollout_wg.update_actor_stream(train_batch)
+                        actor_output = self.actor_rollout_wg.update_actor_stream(prepared)
                         reduced = reduce_metrics(actor_output.meta_info["metrics"])
                         for key, value in reduced.items():
                             metrics_across_chunks.setdefault(key, []).append(value)
@@ -491,20 +491,25 @@ class OneStepOffRayTrainer(RayPPOTrainer):
                         train_buffer_count = 0
 
         if train_buffer:
-            # step 结束时把剩余 buffer 训练并执行 optimizer.step()
-            train_batch = DataProto.concat(train_buffer)
-            train_batch.meta_info["global_token_num"] = torch.sum(
-                train_batch.batch["attention_mask"], dim=-1
+            # step 结束时把剩余 buffer 统一计算并执行 optimizer.step()
+            train_batch_raw = DataProto.concat(train_buffer)
+            prepared, prep_metrics = self._prepare_batch_for_training(train_batch_raw)
+            processed_batches.append(prepared)
+            for key, value in prep_metrics.items():
+                metrics_across_chunks.setdefault(key, []).append(value)
+
+            prepared.meta_info["global_token_num"] = torch.sum(
+                prepared.batch["attention_mask"], dim=-1
             ).tolist()
-            train_batch.meta_info["multi_turn"] = self.config.actor_rollout_ref.rollout.multi_turn.enable
-            train_batch.meta_info["temperature"] = self.config.actor_rollout_ref.rollout.temperature
-            train_batch.meta_info["stream_zero_grad"] = zero_grad
-            train_batch.meta_info["stream_step_optimizer"] = True
+            prepared.meta_info["multi_turn"] = self.config.actor_rollout_ref.rollout.multi_turn.enable
+            prepared.meta_info["temperature"] = self.config.actor_rollout_ref.rollout.temperature
+            prepared.meta_info["stream_zero_grad"] = zero_grad
+            prepared.meta_info["stream_step_optimizer"] = True
             # 记录当前训练 batch 的编号与步数
-            train_batch.meta_info["stream_batch_id"] = b_id_counter
-            train_batch.meta_info["stream_global_steps"] = self.global_steps
+            prepared.meta_info["stream_batch_id"] = b_id_counter
+            prepared.meta_info["stream_global_steps"] = self.global_steps
             b_id_counter += 1
-            actor_output = self.actor_rollout_wg.update_actor_stream(train_batch)
+            actor_output = self.actor_rollout_wg.update_actor_stream(prepared)
             reduced = reduce_metrics(actor_output.meta_info["metrics"])
             for key, value in reduced.items():
                 metrics_across_chunks.setdefault(key, []).append(value)

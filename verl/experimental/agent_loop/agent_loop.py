@@ -16,6 +16,7 @@ import heapq
 import logging
 import os
 import random
+import time
 from abc import ABC, abstractmethod
 from typing import Any, Optional
 from uuid import uuid4
@@ -393,7 +394,6 @@ class AgentLoopWorkerBase:
             tasks.append(task)
 
         outputs = [None] * len(batch)
-        stream_bucket = []
         finished_in_group = 0
         tokens_in_group = 0
         mini_step = 0
@@ -404,42 +404,45 @@ class AgentLoopWorkerBase:
         for task in asyncio.as_completed(tasks):
             index, result = await task
             outputs[index] = result
-            if stream_queue is not None and stream_group_size:
-                # 按 stream_group_size 聚合结果后立即推送到队列
-                stream_bucket.append(result)
-                if len(stream_bucket) >= stream_group_size:
-                    stream_output = self._postprocess(stream_bucket)
-                    stream_bucket = []
-                    await asyncio.to_thread(stream_queue.put, stream_output)
-            num_tokens = result.extra_fields.get("num_tokens")
-            if num_tokens is not None:
-                tokens_in_group += int(num_tokens)
-            finished_in_group += 1
-            if temp_o > 0 and finished_in_group >= temp_o:
-                import time
-
+            if stream_queue is not None:
+                # 每完成一个样本就推送到队列
+                stream_output = self._postprocess([result])
+                await asyncio.to_thread(stream_queue.put, stream_output)
+                # 每完成一个样本就打印日志
+                global_steps = batch.meta_info.get("global_steps", -1)
+                num_tokens = result.extra_fields.get("num_tokens", -1)
                 current_time = time.strftime("%Y-%m-%d %H:%M:%S")
-                if torch.distributed.is_initialized():
-                    rank = torch.distributed.get_rank()
-                else:
-                    rank = 0
                 log_with_rank(
-                    # 仅 rank 0 打印且走统一 logger
-                    f"finish {temp_o} prompts at mini_step {mini_step}, "
-                    f"has {tokens_in_group} tokens. current time {current_time}",
-                    rank=rank,
+                    f"global_steps={global_steps} sample_tokens={num_tokens} current time {current_time}",
+                    rank=0,
                     logger=default_logger,
                     log_only_rank_0=True,
                 )
-                mini_step += 1
-                finished_in_group = 0
-                tokens_in_group = 0
+            # num_tokens = result.extra_fields.get("num_tokens")
+            # if num_tokens is not None:
+            #     tokens_in_group += int(num_tokens)
+            # finished_in_group += 1
+            # if temp_o > 0 and finished_in_group >= temp_o:
+            #     import time
 
-        if stream_queue is not None and stream_group_size and stream_bucket:
-            # 结尾不足一组也要入队
-            stream_output = self._postprocess(stream_bucket)
-            await asyncio.to_thread(stream_queue.put, stream_output)
-            stream_bucket = []
+            #     current_time = time.strftime("%Y-%m-%d %H:%M:%S")
+            #     if torch.distributed.is_initialized():
+            #         rank = torch.distributed.get_rank()
+            #     else:
+            #         rank = 0
+            #     global_steps = batch.meta_info.get("global_steps", -1)
+            #     log_with_rank(
+            #         # 仅 rank 0 打印且走统一 logger
+            #         f"global_steps={global_steps} finish {temp_o} prompts at mini_step {mini_step}, "
+            #         f"has {tokens_in_group} tokens. current time {current_time}",
+            #         rank=rank,
+            #         logger=default_logger,
+            #         log_only_rank_0=True,
+            #     )
+            #     mini_step += 1
+            #     finished_in_group = 0
+            #     tokens_in_group = 0
+
         if stream_queue is not None and stream_end_token is not None:
             # 结束符交由上层统一推送
             await asyncio.to_thread(stream_queue.put, stream_end_token)
