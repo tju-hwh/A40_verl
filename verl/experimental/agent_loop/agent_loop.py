@@ -382,6 +382,14 @@ class AgentLoopWorkerBase:
             batch.meta_info.get("global_steps", -1), index.tolist(), batch.meta_info.get("validate", False)
         )
 
+        current_time = time.strftime("%Y-%m-%d %H:%M:%S")
+        log_with_rank(
+            f"start decode, current time {current_time}, len: {len(batch)}",
+            rank=0,
+            logger=default_logger,
+            log_only_rank_0=True,
+        )
+        
         tasks = []
         for i in range(len(batch)):
             trace_this_sample = i in traced_indices

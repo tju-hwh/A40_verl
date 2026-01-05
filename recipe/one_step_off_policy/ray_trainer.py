@@ -462,8 +462,9 @@ class OneStepOffRayTrainer(RayPPOTrainer):
                     uid_buffer.pop(uid, None)
 
                     train_buffer.append(group_batch)
-                    train_buffer_count += len(group_batch)
-                    if train_buffer_count >= temp_o:
+                    # train_buffer_count += len(group_batch)
+                    # if train_buffer_count >= temp_o:
+                    if True:
                         # 达到 temp_o 才统一计算 reward/logprob/advantage 并训练
                         train_batch_raw = DataProto.concat(train_buffer)
                         prepared, prep_metrics = self._prepare_batch_for_training(train_batch_raw)
