@@ -46,13 +46,14 @@ python3 -m recipe.one_step_off_policy.main_ppo \
     actor_rollout_ref.actor.fsdp_config.param_offload=False \
     actor_rollout_ref.actor.fsdp_config.optimizer_offload=False \
     actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=${micro_batch_size} \
-    actor_rollout_ref.rollout.tensor_model_parallel_size=1 \
+    actor_rollout_ref.rollout.tensor_model_parallel_size=4 \
     actor_rollout_ref.rollout.name=vllm \
     actor_rollout_ref.rollout.gpu_memory_utilization=0.4 \
     actor_rollout_ref.rollout.n=4 \
     actor_rollout_ref.rollout.load_format=safetensors \
     actor_rollout_ref.rollout.layered_summon=True \
     actor_rollout_ref.rollout.max_num_seqs=128 \
+    +actor_rollout_ref.rollout.worker_env.CUDA_MPS_ACTIVE_THREAD_PERCENTAGE="10" \
     actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=${micro_batch_size} \
     actor_rollout_ref.ref.fsdp_config.param_offload=True \
     algorithm.use_kl_in_reward=False \
@@ -64,9 +65,9 @@ python3 -m recipe.one_step_off_policy.main_ppo \
     trainer.save_freq=0 \
     trainer.test_freq=0 \
     trainer.total_epochs=1 \
-    trainer.total_training_steps=5 \
+    trainer.total_training_steps=10 \
     trainer.nnodes="${NNODES}" \
     trainer.stream_train=True \
     trainer.n_gpus_per_node="${n_gpus_training}" \
     rollout.nnodes="${NNODES}" \
-    rollout.n_gpus_per_node="${n_gpus_rollout}" $@ > ./log/log_no_3.log
+    rollout.n_gpus_per_node="${n_gpus_rollout}" $@ > ./log/log_mps_10.log

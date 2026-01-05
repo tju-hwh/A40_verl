@@ -266,6 +266,15 @@ class OneStepOffRayTrainer(RayPPOTrainer):
                     f"mylog [init_worker_groups] loop {idx}, roles={roles}, "
                     f"resource_pool={resource_pool}, class_dict={class_dict}"
                 )
+            
+            # my mps control ---
+            wg_kwargs_local = dict(wg_kwargs)
+            rollout_worker_env = self.config.actor_rollout_ref.rollout.get("worker_env", None)
+            if "rollout" in class_dict and rollout_worker_env:
+                env_dict = OmegaConf.to_container(rollout_worker_env, resolve=True)
+                wg_kwargs_local["worker_env"] = {str(k): str(v) for k, v in env_dict.items()}
+            # my mps control ---end
+                
             worker_dict_cls = create_colocated_worker_cls(class_dict=class_dict)
             if os.environ.get("mylog") == "1":
                 roles = ",".join(class_dict.keys())
@@ -275,7 +284,7 @@ class OneStepOffRayTrainer(RayPPOTrainer):
             wg_dict = self.ray_worker_group_cls(
                 resource_pool=resource_pool,
                 ray_cls_with_init=worker_dict_cls,
-                **wg_kwargs,
+                **wg_kwargs_local,
             )
             spawn_wg = wg_dict.spawn(prefix_set=class_dict.keys())
             all_wg.update(spawn_wg)
@@ -436,7 +445,7 @@ class OneStepOffRayTrainer(RayPPOTrainer):
 
     async def _consume_stream_and_train(self, stream_queue: RayQueue, stream_end_token) -> tuple[dict, DataProto | None]:
         # 按 uid 分组缓存，凑齐 rollout.n 后计算 advantage，再按 temp_o 触发训练
-        temp_o = self._get_stream_group_size()
+        # temp_o = self._get_stream_group_size()
         rollout_n = self.config.actor_rollout_ref.rollout.n
         uid_buffer: dict[str, list[DataProto]] = {}
         train_buffer: list[DataProto] = []
@@ -462,9 +471,9 @@ class OneStepOffRayTrainer(RayPPOTrainer):
                     uid_buffer.pop(uid, None)
 
                     train_buffer.append(group_batch)
-                    # train_buffer_count += len(group_batch)
-                    # if train_buffer_count >= temp_o:
-                    if True:
+                    train_buffer_count += len(group_batch)
+                    if train_buffer_count >= 1 * rollout_n:
+                    # if True:
                         # 达到 temp_o 才统一计算 reward/logprob/advantage 并训练
                         train_batch_raw = DataProto.concat(train_buffer)
                         prepared, prep_metrics = self._prepare_batch_for_training(train_batch_raw)
