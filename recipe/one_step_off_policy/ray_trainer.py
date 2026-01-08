@@ -60,6 +60,8 @@ from verl.utils.metric import (
 )
 from verl.utils.tracking import ValidationGenerationsLogger
 import os
+from verl.utils.logger import default_logger, log_with_rank
+import time
 
 class OneStepOffRayTrainer(RayPPOTrainer):
     # TODO: support each role have individual ray_worker_group_cls,
@@ -503,6 +505,14 @@ class OneStepOffRayTrainer(RayPPOTrainer):
                         train_buffer_count = 0
 
         if train_buffer:
+            current_time = time.strftime("%Y-%m-%d %H:%M:%S")
+            log_with_rank(
+                f"train_buffer has triggerd! current time {current_time}",
+                rank=0,
+                logger=default_logger,
+                log_only_rank_0=True,
+            )
+                
             # step 结束时把剩余 buffer 统一计算并执行 optimizer.step()
             train_batch_raw = DataProto.concat(train_buffer)
             prepared, prep_metrics = self._prepare_batch_for_training(train_batch_raw)
