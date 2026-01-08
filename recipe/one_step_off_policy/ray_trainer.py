@@ -462,6 +462,7 @@ class OneStepOffRayTrainer(RayPPOTrainer):
 
             chunk: DataProto = item
             uids = chunk.non_tensor_batch["uid"]
+            # print(f"len(chunk) :{len(chunk)}")
             for idx in range(len(chunk)):
                 uid = uids[idx]
                 uid_list = uid_buffer.setdefault(uid, [])
@@ -469,10 +470,10 @@ class OneStepOffRayTrainer(RayPPOTrainer):
                 if len(uid_list) == rollout_n:
                     group_batch = DataProto.concat(uid_list)
                     uid_buffer.pop(uid, None)
-
+                    # print(f"uid is {uid}, len(group_batch) is {len(group_batch)}")
                     train_buffer.append(group_batch)
                     train_buffer_count += len(group_batch)
-                    if train_buffer_count >= 1 * rollout_n:
+                    if train_buffer_count >= 16 * rollout_n:
                     # if True:
                         # 达到 temp_o 才统一计算 reward/logprob/advantage 并训练
                         train_batch_raw = DataProto.concat(train_buffer)
