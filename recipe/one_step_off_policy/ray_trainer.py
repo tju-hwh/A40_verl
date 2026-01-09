@@ -456,6 +456,9 @@ class OneStepOffRayTrainer(RayPPOTrainer):
         train_buffer_count = 0
         zero_grad = True
         b_id_counter = 0
+        # 每次训练触发阈值（以 rollout 分组个数计），按顺序消费
+        train_group_plan = [2, 2, 4, 4, 4] + [8] * 13 + [4, 4]
+        plan_idx = 0
 
         while True:
             item = await asyncio.to_thread(stream_queue.get)
@@ -475,7 +478,9 @@ class OneStepOffRayTrainer(RayPPOTrainer):
                     # print(f"uid is {uid}, len(group_batch) is {len(group_batch)}")
                     train_buffer.append(group_batch)
                     train_buffer_count += len(group_batch)
-                    if train_buffer_count >= 8 * rollout_n:
+                    # target_groups = train_group_plan[min(plan_idx, len(train_group_plan) - 1)]
+                    target_groups = train_group_plan[plan_idx]
+                    if train_buffer_count >= target_groups * rollout_n:
                     # if True:
                         # 达到 temp_o 才统一计算 reward/logprob/advantage 并训练
                         train_batch_raw = DataProto.concat(train_buffer)
@@ -503,6 +508,8 @@ class OneStepOffRayTrainer(RayPPOTrainer):
                         zero_grad = False
                         train_buffer = []
                         train_buffer_count = 0
+                        print(f"target_groups: {target_groups}")
+                        plan_idx += 1
 
         if train_buffer:
             current_time = time.strftime("%Y-%m-%d %H:%M:%S")
