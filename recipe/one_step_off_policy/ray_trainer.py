@@ -469,8 +469,10 @@ class OneStepOffRayTrainer(RayPPOTrainer):
         b_id_counter = 0
         stream_max_samples = self.config.trainer.get("stream_max_samples", None)
         completed_uids: set[str] = set()
+        stop_triggered = False
         # 每次训练触发阈值（以 rollout 分组个数计），按顺序消费
-        train_group_plan = [2, 2, 4, 4, 4] + [8] * 20
+        # train_group_plan = [2, 2, 4, 4, 4] + [8] * 20
+        train_group_plan = [8] * 30
         plan_idx = 0
 
         while True:
@@ -486,21 +488,22 @@ class OneStepOffRayTrainer(RayPPOTrainer):
                 uid_list = uid_buffer.setdefault(uid, [])
                 uid_list.append(chunk.select_idxs([idx]))
                 if len(uid_list) == rollout_n:
-                    completed_uids.add(uid)
-                    if stream_max_samples is not None and len(completed_uids) >= int(stream_max_samples):
-                        print("arrive stream_max_samples!")
-                        if hasattr(self, "stream_stop_flag") and self.stream_stop_flag is not None:
-                            await asyncio.to_thread(ray.get, self.stream_stop_flag.set.remote())
-                        await asyncio.to_thread(stream_queue.put, stream_end_token)
-                        break
                     group_batch = DataProto.concat(uid_list)
                     uid_buffer.pop(uid, None)
                     # print(f"uid is {uid}, len(group_batch) is {len(group_batch)}")
                     train_buffer.append(group_batch)
                     train_buffer_count += len(group_batch)
+                    completed_uids.add(uid)
+                    if stream_max_samples is not None and len(completed_uids) >= int(stream_max_samples):
+                        print("arrive stream_max_samples!")
+                        stop_triggered = True
+                        if hasattr(self, "stream_stop_flag") and self.stream_stop_flag is not None:
+                            await asyncio.to_thread(ray.get, self.stream_stop_flag.set.remote())
+                        await asyncio.to_thread(stream_queue.put, stream_end_token)
+                        break
                     # target_groups = train_group_plan[min(plan_idx, len(train_group_plan) - 1)]
                     target_groups = train_group_plan[plan_idx]
-                    if train_buffer_count >= target_groups * rollout_n:
+                    if not stop_triggered and train_buffer_count >= target_groups * rollout_n:
                     # if True:
                         # 达到 temp_o 才统一计算 reward/logprob/advantage 并训练
                         train_batch_raw = DataProto.concat(train_buffer)
@@ -530,10 +533,12 @@ class OneStepOffRayTrainer(RayPPOTrainer):
                         train_buffer_count = 0
                         print(f"target_groups: {target_groups}")
                         plan_idx += 1
-            if stream_max_samples is not None and len(completed_uids) >= int(stream_max_samples):
+            if stop_triggered or (
+                stream_max_samples is not None and len(completed_uids) >= int(stream_max_samples)
+            ):
                 break
 
-        if train_buffer:
+        if train_buffer and not stop_triggered:
             current_time = time.strftime("%Y-%m-%d %H:%M:%S")
             log_with_rank(
                 f"train_buffer has triggerd! current time {current_time}",
