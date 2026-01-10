@@ -88,16 +88,24 @@ class OneStepOffAgentLoopManager(AgentLoopManager):
                 for worker, chunk in zip(self.agent_loop_workers, chunkes, strict=True)
             ]
         )
+        keep_indices = []
+        running_offset = 0
+        saw_early_stop = False
+        for worker_output in outputs:
+            worker_keep = worker_output.meta_info.pop("early_stop_indices", None)
+            if worker_keep is None:
+                worker_keep = list(range(len(worker_output)))
+            else:
+                saw_early_stop = True
+            # Keep indices must align with the concatenated output length, not original chunk offsets.
+            for idx in worker_keep:
+                if 0 <= idx < len(worker_output):
+                    keep_indices.append(running_offset + idx)
+            running_offset += len(worker_output)
         output = DataProto.concat(outputs)
         metrics = [output.meta_info.pop("metrics") for output in outputs]
         timing = self._performance_metrics(metrics, output)
-        keep_indices = []
-        for i, worker_output in enumerate(outputs):
-            worker_keep = worker_output.meta_info.get("early_stop_indices")
-            if worker_keep is None:
-                worker_keep = list(range(len(worker_output)))
-            keep_indices.extend([chunk_offsets[i] + idx for idx in worker_keep])
-        if keep_indices:
+        if saw_early_stop and keep_indices:
             output.meta_info["early_stop_indices"] = keep_indices
         output.meta_info = {"timing": timing, **output.meta_info}
         if stream_queue is not None and stream_end_token is not None:

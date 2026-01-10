@@ -479,8 +479,11 @@ class OneStepOffRayTrainer(RayPPOTrainer):
                     train_buffer.append(group_batch)
                     train_buffer_count += len(group_batch)
                     # target_groups = train_group_plan[min(plan_idx, len(train_group_plan) - 1)]
-                    target_groups = train_group_plan[plan_idx]
-                    if train_buffer_count >= target_groups * rollout_n:
+                    
+                    # target_groups = train_group_plan[plan_idx]
+                    # if train_buffer_count >= target_groups * rollout_n:
+                    
+                    if train_buffer_count >= 8 * rollout_n:
                     # if True:
                         # 达到 temp_o 才统一计算 reward/logprob/advantage 并训练
                         train_batch_raw = DataProto.concat(train_buffer)
@@ -508,7 +511,7 @@ class OneStepOffRayTrainer(RayPPOTrainer):
                         zero_grad = False
                         train_buffer = []
                         train_buffer_count = 0
-                        print(f"target_groups: {target_groups}")
+                        # print(f"target_groups: {target_groups}")
                         plan_idx += 1
 
         if train_buffer:
@@ -587,13 +590,23 @@ class OneStepOffRayTrainer(RayPPOTrainer):
         batch = batch.repeat(repeat_times=self.config.actor_rollout_ref.rollout.n, interleave=True)
         early_stop_indices = gen_batch_output.meta_info.pop("early_stop_indices", None)
         if early_stop_indices is not None:
-            gen_batch_output = gen_batch_output.select_idxs(early_stop_indices)
-            batch = batch.select_idxs(early_stop_indices)
+            valid_indices = [i for i in early_stop_indices if 0 <= i < len(gen_batch_output)]
+            gen_batch_output = gen_batch_output.select_idxs(valid_indices)
+            batch = batch.select_idxs(valid_indices)
+        if "uid" in gen_batch_output.non_tensor_batch:
+            # Ensure uid alignment after early-stop filtering to avoid union assertion.
+            gen_batch_output.non_tensor_batch["uid"] = batch.non_tensor_batch["uid"]
         batch = batch.union(gen_batch_output)
 
         if "response_mask" not in batch.batch.keys():
             batch.batch["response_mask"] = compute_response_mask(batch)
         if self.config.trainer.balance_batch:
+            # Early-stop can make batch size not divisible by DP world size.
+            world_size = int(self.config.trainer.n_gpus_per_node)
+            remainder = len(batch) % world_size
+            if remainder != 0:
+                keep = len(batch) - remainder
+                batch = batch.select_idxs(list(range(keep)))
             self._balance_batch(batch, metrics=metrics)
 
         batch.meta_info["global_token_num"] = torch.sum(batch.batch["attention_mask"], dim=-1).tolist()
