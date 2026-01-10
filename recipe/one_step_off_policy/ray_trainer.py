@@ -457,8 +457,27 @@ class OneStepOffRayTrainer(RayPPOTrainer):
         zero_grad = True
         b_id_counter = 0
         # 每次训练触发阈值（以 rollout 分组个数计），按顺序消费
-        train_group_plan = [2, 2, 4, 4, 4] + [8] * 13 + [4, 4]
+        # all_train_group_plans = [
+        #     [2, 2, 4, 4, 4] + [8] * 17 + [4, 4],
+        #     [2, 2, 4] + [16] * 9 + [4, 4],
+        #     [4] * 40,
+        #     [8] * 20,
+        #     [16] * 10, 
+        #     # [2, 2, 4, 8, 32, 32, 32, 8, 4, 2, 2],
+        #     # [4, 4, 8, 16, 24, 24, 16, 16, 8, 4, 4],
+        #     # [2, 4, 8, 16, 32, 32, 16, 8, 4, 4, 2],
+        #     # [4, 4, 8, 16, 32, 24, 16, 8, 8, 4, 4],
+        #     # [2, 2, 4, 8, 24, 24, 24, 16, 8, 8, 4, 2, 2],
+        #     # [4, 4, 8, 12, 16, 32, 16, 12, 8, 8, 4, 4],
+        #     # [2, 4, 8, 16, 32, 24, 12, 16, 8, 4, 2],
+        #     # [4, 4, 8, 12, 20, 32, 20, 12, 8, 4, 4],
+        # ]
         plan_idx = 0
+        # plan_cycle_idx = getattr(self, "_train_group_plan_idx", 0)
+        # train_group_plan = all_train_group_plans[plan_cycle_idx % len(all_train_group_plans)]
+        # self._train_group_plan_idx = plan_cycle_idx + 1
+        # print(train_group_plan)
+        train_group_plan=[8] * 30
 
         while True:
             item = await asyncio.to_thread(stream_queue.get)
@@ -583,6 +602,13 @@ class OneStepOffRayTrainer(RayPPOTrainer):
             )
 
         batch = batch.repeat(repeat_times=self.config.actor_rollout_ref.rollout.n, interleave=True)
+        early_stop_indices = gen_batch_output.meta_info.pop("early_stop_indices", None)
+        if early_stop_indices is not None:
+            valid_indices = [i for i in early_stop_indices if 0 <= i < len(gen_batch_output)]
+            gen_batch_output = gen_batch_output.select_idxs(valid_indices)
+            batch = batch.select_idxs(valid_indices)
+        if "uid" in gen_batch_output.non_tensor_batch:
+            gen_batch_output.non_tensor_batch["uid"] = batch.non_tensor_batch["uid"]
         batch = batch.union(gen_batch_output)
 
         if "response_mask" not in batch.batch.keys():

@@ -121,7 +121,7 @@ class ToolAgentLoop(AgentLoopBase):
         messages = list(kwargs["raw_prompt"])
         image_data = copy.deepcopy(kwargs.get("multi_modal_data", {}).get("image", None))
         metrics = {}
-        request_id = uuid4().hex
+        request_id = kwargs.get("request_id") or uuid4().hex
         tools_kwargs = kwargs.get("tools_kwargs", {})
 
         # Initialize interaction if needed
@@ -181,6 +181,7 @@ class ToolAgentLoop(AgentLoopBase):
             metrics=agent_data.metrics,
             extra_fields={},
         )
+        output.extra_fields["request_id"] = request_id
         output.extra_fields.update({"turn_scores": agent_data.turn_scores, "tool_rewards": agent_data.tool_rewards})
         return output
 

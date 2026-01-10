@@ -110,12 +110,31 @@ class AsyncLLMServerManager:
         """
         server = self._choose_server(request_id)
         output = await server.generate.remote(
-            request_id=uuid4().hex,  # use new request_id for each turn
+            request_id=request_id,
             prompt_ids=prompt_ids,
             sampling_params=sampling_params,
             image_data=image_data,
         )
         return output
+
+    async def abort_requests(self, request_ids: list[str]) -> None:
+        if not request_ids:
+            return
+        server_to_ids: dict[ray.actor.ActorHandle, list[str]] = {}
+        unknown_ids: list[str] = []
+        for request_id in request_ids:
+            server = self.request_id_to_server.get(request_id)
+            if server is None:
+                unknown_ids.append(request_id)
+                continue
+            server_to_ids.setdefault(server, []).append(request_id)
+
+        await asyncio.gather(
+            *[server.abort.remote(req_ids) for server, req_ids in server_to_ids.items()]
+        )
+
+        if unknown_ids:
+            await asyncio.gather(*[server.abort.remote(unknown_ids) for server in self.server_handles])
 
 
 class AgentLoopMetrics(BaseModel):
@@ -391,27 +410,85 @@ class AgentLoopWorkerBase:
         )
         
         tasks = []
+        task_uid_map = {}
+        task_request_id_map = {}
+        uids = batch.non_tensor_batch.get("uid")
+        uid_counts = {uid: 0 for uid in uids} if uids is not None else None
+        rollout_n = int(self.config.actor_rollout_ref.rollout.n)
+        stream_max_samples = self.config.trainer.get("stream_max_samples", None)
+        zero_uid_canceled = False
         for i in range(len(batch)):
             trace_this_sample = i in traced_indices
             kwargs = {k: v[i] for k, v in batch.non_tensor_batch.items()}
+            task_uid = kwargs.get("uid")
+            request_id = kwargs.get("request_id")
+            if request_id is None:
+                request_id = f"{task_uid}:{uuid4().hex}" if task_uid is not None else uuid4().hex
+            kwargs["request_id"] = request_id
             async def _run_with_index(index, trace, kw):
                 result = await self._run_agent_loop(sampling_params, trajectory_info[index], trace=trace, **kw)
                 return index, result
 
             task = asyncio.create_task(_run_with_index(i, trace_this_sample, kwargs))
+            if task_uid is not None:
+                task_uid_map[task] = task_uid
+            task_request_id_map[task] = request_id
             tasks.append(task)
 
         outputs = [None] * len(batch)
+        completed_indices: list[int] = []
         finished_in_group = 0
         tokens_in_group = 0
         mini_step = 0
+        stop_requested = False
         micro_batch_size = self.config.actor_rollout_ref.actor.get("ppo_micro_batch_size_per_gpu")
         if micro_batch_size is None:
             micro_batch_size = self.config.actor_rollout_ref.actor.get("ppo_micro_batch_size", 1)
         temp_o = int(self.config.trainer.n_gpus_per_node) * int(micro_batch_size or 1)
         for task in asyncio.as_completed(tasks):
-            index, result = await task
+            try:
+                index, result = await task
+            except asyncio.CancelledError:
+                continue
             outputs[index] = result
+            completed_indices.append(index)
+            if uid_counts is not None:
+                uid = result.extra_fields.get("uid")
+                if uid is not None and uid in uid_counts:
+                    uid_counts[uid] += 1
+                    if (
+                        not zero_uid_canceled
+                        and stream_max_samples is not None
+                        and sum(1 for v in uid_counts.values() if v >= rollout_n) >= int(stream_max_samples)
+                    ):
+                        zero_uid_canceled = True
+                        sorted_counts = sorted(
+                            ((str(k), v) for k, v in uid_counts.items()),
+                            key=lambda x: (-x[1], x[0]),
+                        )
+                        log_with_rank(
+                            f"uid completion counts: {sorted_counts}",
+                            rank=0,
+                            logger=default_logger,
+                            log_only_rank_0=True,
+                        )
+                        zero_uids = {k for k, v in uid_counts.items() if v == 0}
+                        abort_request_ids = [
+                            rid
+                            for t, rid in task_request_id_map.items()
+                            if not t.done() and task_uid_map.get(t) in zero_uids
+                        ]
+                        for pending in tasks:
+                            if not pending.done() and task_uid_map.get(pending) in zero_uids:
+                                pending.cancel()
+                        stop_requested = True
+                        asyncio.create_task(self.server_manager.abort_requests(abort_request_ids))
+                        log_with_rank(
+                            f"canceled_zero_uid_count={len(zero_uids)}",
+                            rank=0,
+                            logger=default_logger,
+                            log_only_rank_0=True,
+                        )
             if stream_queue is not None:
                 # 每完成一个样本就推送到队列
                 stream_output = self._postprocess([result])
@@ -455,7 +532,13 @@ class AgentLoopWorkerBase:
             # 结束符交由上层统一推送
             await asyncio.to_thread(stream_queue.put, stream_end_token)
 
-        output = self._postprocess(outputs)
+        if completed_indices:
+            keep_indices = sorted(completed_indices)
+            output = self._postprocess([outputs[i] for i in keep_indices])
+            if stop_requested:
+                output.meta_info["early_stop_indices"] = keep_indices
+        else:
+            output = self._postprocess(outputs)
 
         return output
 
@@ -499,6 +582,8 @@ class AgentLoopWorkerBase:
         if "uid" in kwargs:
             # 保留 uid 用于下游按 uid 分组
             output.extra_fields["uid"] = kwargs["uid"]
+        if "request_id" in kwargs:
+            output.extra_fields["request_id"] = kwargs["request_id"]
         output.extra_fields["num_tokens"] = len(output.prompt_ids) + len(output.response_ids)
 
         # Some AgentLoop may have already computed the reward score, e.g SWE-agent.

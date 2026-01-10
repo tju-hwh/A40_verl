@@ -462,6 +462,10 @@ class vLLMHttpServerBase:
     async def wait_for_requests_to_drain(self):
         await self.engine.wait_for_requests_to_drain()
 
+    async def abort(self, request_ids: str | list[str]):
+        if self.node_rank == 0:
+            await self.engine.abort(request_ids)
+
 
 @ray.remote(num_cpus=1)
 class vLLMHttpServer(vLLMHttpServerBase):

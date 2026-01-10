@@ -39,7 +39,7 @@ class SingleTurnAgentLoop(AgentLoopBase):
         image_data = copy.deepcopy((kwargs.get("multi_modal_data") or {}).get("image", None))
 
         metrics = {}
-        request_id = uuid4().hex
+        request_id = kwargs.get("request_id") or uuid4().hex
 
         # Use processor if available for multimodal support
         if self.processor is not None:
@@ -77,4 +77,5 @@ class SingleTurnAgentLoop(AgentLoopBase):
             num_turns=2,
             metrics=metrics,
         )
+        output.extra_fields["request_id"] = request_id
         return output
