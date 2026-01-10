@@ -211,6 +211,9 @@ trainer:
   # whether to enable streaming training (actor only)
   stream_train: False
 
+  # stop streaming generation after N samples (null to disable)
+  stream_max_samples: null
+
 # profiler configs
 global_profiler:
 

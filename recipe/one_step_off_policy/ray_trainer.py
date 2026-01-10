@@ -63,6 +63,17 @@ import os
 from verl.utils.logger import default_logger, log_with_rank
 import time
 
+@ray.remote
+class StreamStopFlag:
+    def __init__(self):
+        self._stopped = False
+
+    def set(self):
+        self._stopped = True
+
+    def is_set(self) -> bool:
+        return self._stopped
+
 class OneStepOffRayTrainer(RayPPOTrainer):
     # TODO: support each role have individual ray_worker_group_cls,
     # i.e., support different backend of different role
@@ -456,8 +467,10 @@ class OneStepOffRayTrainer(RayPPOTrainer):
         train_buffer_count = 0
         zero_grad = True
         b_id_counter = 0
+        stream_max_samples = self.config.trainer.get("stream_max_samples", None)
+        completed_uids: set[str] = set()
         # 每次训练触发阈值（以 rollout 分组个数计），按顺序消费
-        train_group_plan = [2, 2, 4, 4, 4] + [8] * 13 + [4, 4]
+        train_group_plan = [2, 2, 4, 4, 4] + [8] * 20
         plan_idx = 0
 
         while True:
@@ -473,6 +486,13 @@ class OneStepOffRayTrainer(RayPPOTrainer):
                 uid_list = uid_buffer.setdefault(uid, [])
                 uid_list.append(chunk.select_idxs([idx]))
                 if len(uid_list) == rollout_n:
+                    completed_uids.add(uid)
+                    if stream_max_samples is not None and len(completed_uids) >= int(stream_max_samples):
+                        print("arrive stream_max_samples!")
+                        if hasattr(self, "stream_stop_flag") and self.stream_stop_flag is not None:
+                            await asyncio.to_thread(ray.get, self.stream_stop_flag.set.remote())
+                        await asyncio.to_thread(stream_queue.put, stream_end_token)
+                        break
                     group_batch = DataProto.concat(uid_list)
                     uid_buffer.pop(uid, None)
                     # print(f"uid is {uid}, len(group_batch) is {len(group_batch)}")
@@ -510,6 +530,8 @@ class OneStepOffRayTrainer(RayPPOTrainer):
                         train_buffer_count = 0
                         print(f"target_groups: {target_groups}")
                         plan_idx += 1
+            if stream_max_samples is not None and len(completed_uids) >= int(stream_max_samples):
+                break
 
         if train_buffer:
             current_time = time.strftime("%Y-%m-%d %H:%M:%S")
@@ -580,9 +602,18 @@ class OneStepOffRayTrainer(RayPPOTrainer):
                 stream_queue=stream_queue,
                 stream_group_size=self._get_stream_group_size(),
                 stream_end_token=stream_end_token,
+                stream_stop_flag=self.stream_stop_flag,
             )
 
         batch = batch.repeat(repeat_times=self.config.actor_rollout_ref.rollout.n, interleave=True)
+        early_stop_indices = gen_batch_output.meta_info.pop("early_stop_indices", None)
+        if early_stop_indices is not None:
+            valid_indices = [i for i in early_stop_indices if 0 <= i < len(gen_batch_output)]
+            gen_batch_output = gen_batch_output.select_idxs(valid_indices)
+            batch = batch.select_idxs(valid_indices)
+        if "uid" in gen_batch_output.non_tensor_batch:
+            # Keep uid aligned after early-stop filtering to avoid union assertion.
+            gen_batch_output.non_tensor_batch["uid"] = batch.non_tensor_batch["uid"]
         batch = batch.union(gen_batch_output)
 
         if "response_mask" not in batch.batch.keys():
@@ -762,6 +793,7 @@ class OneStepOffRayTrainer(RayPPOTrainer):
             # 使用 RayQueue 进行流式训练传递
             stream_queue = RayQueue()
             stream_end_token = f"__stream_end__{uuid.uuid4()}"
+            self.stream_stop_flag = StreamStopFlag.remote()
             batch_future = asyncio.create_task(
                 self._async_gen_next_batch_stream(continuous_iterator, stream_queue, stream_end_token)
             )

@@ -318,6 +318,7 @@ class AgentLoopWorkerBase:
         stream_queue=None,
         stream_group_size: int | None = None,
         stream_end_token=None,
+        stream_stop_flag=None,
     ) -> DataProto:
         """Generate sequences from agent loop.
 
@@ -402,6 +403,8 @@ class AgentLoopWorkerBase:
             tasks.append(task)
 
         outputs = [None] * len(batch)
+        completed_indices: list[int] = []
+        early_stop = False
         finished_in_group = 0
         tokens_in_group = 0
         mini_step = 0
@@ -410,8 +413,18 @@ class AgentLoopWorkerBase:
             micro_batch_size = self.config.actor_rollout_ref.actor.get("ppo_micro_batch_size", 1)
         temp_o = int(self.config.trainer.n_gpus_per_node) * int(micro_batch_size or 1)
         for task in asyncio.as_completed(tasks):
+            if stream_stop_flag is not None:
+                should_stop = await asyncio.to_thread(ray.get, stream_stop_flag.is_set.remote())
+                if should_stop:
+                    early_stop = True
+                    for pending in tasks:
+                        if not pending.done():
+                            pending.cancel()
+                    await asyncio.gather(*tasks, return_exceptions=True)
+                    break
             index, result = await task
             outputs[index] = result
+            completed_indices.append(index)
             if stream_queue is not None:
                 # 每完成一个样本就推送到队列
                 stream_output = self._postprocess([result])
@@ -451,11 +464,16 @@ class AgentLoopWorkerBase:
             #     finished_in_group = 0
             #     tokens_in_group = 0
 
-        if stream_queue is not None and stream_end_token is not None:
+        if not early_stop and stream_queue is not None and stream_end_token is not None:
             # 结束符交由上层统一推送
             await asyncio.to_thread(stream_queue.put, stream_end_token)
 
-        output = self._postprocess(outputs)
+        if early_stop:
+            keep_indices = sorted(completed_indices)
+            output = self._postprocess([outputs[i] for i in keep_indices])
+            output.meta_info["early_stop_indices"] = keep_indices
+        else:
+            output = self._postprocess(outputs)
 
         return output
 
