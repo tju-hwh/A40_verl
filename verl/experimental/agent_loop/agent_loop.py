@@ -117,6 +117,35 @@ class AsyncLLMServerManager:
         )
         return output
 
+    async def clear_kv_cache(self):
+        await asyncio.gather(*[server.clear_kv_cache.remote() for server in self.server_handles])
+
+
+@ray.remote
+class GlobalSampleCounter:
+    def __init__(self, limit: int):
+        self.limit = limit
+        self.count = 0
+        self.stopped = False
+        self.end_token_sent = False
+
+    def add(self, n: int = 1) -> dict:
+        if self.limit is None:
+            return {"stop": False}
+        if self.stopped:
+            return {"stop": True}
+        self.count += n
+        if self.count >= self.limit:
+            self.stopped = True
+            return {"stop": True}
+        return {"stop": False}
+
+    def claim_end_token(self) -> bool:
+        if self.end_token_sent:
+            return False
+        self.end_token_sent = True
+        return True
+
 
 class AgentLoopMetrics(BaseModel):
     """Agent loop performance metrics."""
@@ -318,6 +347,8 @@ class AgentLoopWorkerBase:
         stream_queue=None,
         stream_group_size: int | None = None,
         stream_end_token=None,
+        stream_max_samples: int | None = None,
+        stream_counter=None,
     ) -> DataProto:
         """Generate sequences from agent loop.
 
@@ -402,9 +433,12 @@ class AgentLoopWorkerBase:
             tasks.append(task)
 
         outputs = [None] * len(batch)
+        completed_indices: list[int] = []
         finished_in_group = 0
         tokens_in_group = 0
         mini_step = 0
+        completed_samples = 0
+        early_stop = False
         micro_batch_size = self.config.actor_rollout_ref.actor.get("ppo_micro_batch_size_per_gpu")
         if micro_batch_size is None:
             micro_batch_size = self.config.actor_rollout_ref.actor.get("ppo_micro_batch_size", 1)
@@ -412,6 +446,7 @@ class AgentLoopWorkerBase:
         for task in asyncio.as_completed(tasks):
             index, result = await task
             outputs[index] = result
+            completed_indices.append(index)
             if stream_queue is not None:
                 # 每完成一个样本就推送到队列
                 stream_output = self._postprocess([result])
@@ -426,6 +461,30 @@ class AgentLoopWorkerBase:
                     logger=default_logger,
                     log_only_rank_0=True,
                 )
+                if stream_max_samples is not None:
+                    if stream_counter is None:
+                        completed_samples += 1
+                        reached_limit = completed_samples >= stream_max_samples
+                        claim_end_token = True
+                    else:
+                        status = await asyncio.to_thread(ray.get, stream_counter.add.remote(1))
+                        reached_limit = status.get("stop", False)
+                        claim_end_token = False
+                        if reached_limit:
+                            claim_end_token = await asyncio.to_thread(
+                                ray.get, stream_counter.claim_end_token.remote()
+                            )
+                    if reached_limit:
+                        early_stop = True
+                        for pending in tasks:
+                            if not pending.done():
+                                pending.cancel()
+                        await asyncio.gather(*tasks, return_exceptions=True)
+                        if hasattr(self.server_manager, "clear_kv_cache"):
+                            await self.server_manager.clear_kv_cache()
+                        if stream_end_token is not None and claim_end_token:
+                            await asyncio.to_thread(stream_queue.put, stream_end_token)
+                        break
             # num_tokens = result.extra_fields.get("num_tokens")
             # if num_tokens is not None:
             #     tokens_in_group += int(num_tokens)
@@ -451,11 +510,16 @@ class AgentLoopWorkerBase:
             #     finished_in_group = 0
             #     tokens_in_group = 0
 
-        if stream_queue is not None and stream_end_token is not None:
+        if not early_stop and stream_queue is not None and stream_end_token is not None:
             # 结束符交由上层统一推送
             await asyncio.to_thread(stream_queue.put, stream_end_token)
 
-        output = self._postprocess(outputs)
+        if early_stop:
+            keep_indices = sorted(completed_indices)
+            output = self._postprocess([outputs[i] for i in keep_indices])
+            output.meta_info["early_stop_indices"] = keep_indices
+        else:
+            output = self._postprocess(outputs)
 
         return output
 

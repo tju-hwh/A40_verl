@@ -17,7 +17,7 @@ import os
 
 import ray
 
-from verl.experimental.agent_loop.agent_loop import AgentLoopManager
+from verl.experimental.agent_loop.agent_loop import AgentLoopManager, GlobalSampleCounter
 from verl.protocol import DataProto
 
 logger = logging.getLogger(__file__)
@@ -60,9 +60,18 @@ class OneStepOffAgentLoopManager(AgentLoopManager):
         stream_queue,
         stream_group_size: int,
         stream_end_token=None,
+        stream_max_samples: int | None = None,
     ) -> DataProto:
         """Split input batch and dispatch to agent loop workers (async version) with streaming output."""
         chunkes = prompts.chunk(len(self.agent_loop_workers))
+        stream_counter = None
+        if stream_max_samples is not None:
+            stream_counter = GlobalSampleCounter.remote(stream_max_samples)
+        chunk_offsets = []
+        offset = 0
+        for chunk in chunkes:
+            chunk_offsets.append(offset)
+            offset += len(chunk)
         outputs = await asyncio.gather(
             *[
                 asyncio.to_thread(
@@ -71,7 +80,9 @@ class OneStepOffAgentLoopManager(AgentLoopManager):
                         chunk,
                         stream_queue=stream_queue,
                         stream_group_size=stream_group_size,
-                        stream_end_token=None,  # 结束符只由 manager 发出
+                        stream_end_token=stream_end_token if stream_max_samples is not None else None,
+                        stream_max_samples=stream_max_samples,
+                        stream_counter=stream_counter,
                     ),
                 )
                 for worker, chunk in zip(self.agent_loop_workers, chunkes, strict=True)
@@ -80,10 +91,23 @@ class OneStepOffAgentLoopManager(AgentLoopManager):
         output = DataProto.concat(outputs)
         metrics = [output.meta_info.pop("metrics") for output in outputs]
         timing = self._performance_metrics(metrics, output)
-        output.meta_info = {"timing": timing, **outputs[0].meta_info}
+        keep_indices = []
+        for i, worker_output in enumerate(outputs):
+            worker_keep = worker_output.meta_info.get("early_stop_indices")
+            if worker_keep is None:
+                worker_keep = list(range(len(worker_output)))
+            keep_indices.extend([chunk_offsets[i] + idx for idx in worker_keep])
+        if keep_indices:
+            output.meta_info["early_stop_indices"] = keep_indices
+        output.meta_info = {"timing": timing, **output.meta_info}
         if stream_queue is not None and stream_end_token is not None:
+            if stream_counter is not None:
+                claim_end_token = await asyncio.to_thread(ray.get, stream_counter.claim_end_token.remote())
+            else:
+                claim_end_token = True
             # 只发送一个结束符，避免多 worker 重复
-            await asyncio.to_thread(stream_queue.put, stream_end_token)
+            if claim_end_token:
+                await asyncio.to_thread(stream_queue.put, stream_end_token)
         return output
 
     async def wake_up(self):

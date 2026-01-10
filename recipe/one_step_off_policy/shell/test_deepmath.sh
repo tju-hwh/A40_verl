@@ -69,6 +69,7 @@ python3 -m recipe.one_step_off_policy.main_ppo \
     trainer.total_training_steps=3 \
     trainer.nnodes="${NNODES}" \
     trainer.stream_train=True \
+    trainer.stream_max_samples=600 \
     trainer.n_gpus_per_node="${n_gpus_training}" \
     rollout.nnodes="${NNODES}" \
     rollout.n_gpus_per_node="${n_gpus_rollout}" $@ > ./log/log_mps_06.log

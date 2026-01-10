@@ -574,15 +574,21 @@ class OneStepOffRayTrainer(RayPPOTrainer):
         gen_batch.meta_info["global_steps"] = self.global_steps
         gen_batch_output = gen_batch.repeat(repeat_times=self.config.actor_rollout_ref.rollout.n, interleave=True)
 
+        stream_max_samples = self.config.trainer.get("stream_max_samples", None)
         with marked_timer("generate_async", timing_raw, color="purple"):
             gen_batch_output = await self.async_rollout_manager.generate_sequences_async_stream(
                 gen_batch_output,
                 stream_queue=stream_queue,
                 stream_group_size=self._get_stream_group_size(),
                 stream_end_token=stream_end_token,
+                stream_max_samples=stream_max_samples,
             )
 
         batch = batch.repeat(repeat_times=self.config.actor_rollout_ref.rollout.n, interleave=True)
+        early_stop_indices = gen_batch_output.meta_info.pop("early_stop_indices", None)
+        if early_stop_indices is not None:
+            gen_batch_output = gen_batch_output.select_idxs(early_stop_indices)
+            batch = batch.select_idxs(early_stop_indices)
         batch = batch.union(gen_batch_output)
 
         if "response_mask" not in batch.batch.keys():
