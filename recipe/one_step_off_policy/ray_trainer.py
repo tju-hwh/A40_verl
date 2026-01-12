@@ -477,7 +477,7 @@ class OneStepOffRayTrainer(RayPPOTrainer):
         # train_group_plan = all_train_group_plans[plan_cycle_idx % len(all_train_group_plans)]
         # self._train_group_plan_idx = plan_cycle_idx + 1
         # print(train_group_plan)
-        train_group_plan= [8] * 2 + [16] * 20
+        train_group_plan= [8] * 20 
 
         while True:
             item = await asyncio.to_thread(stream_queue.get)
@@ -791,6 +791,7 @@ class OneStepOffRayTrainer(RayPPOTrainer):
 
         stream_train = self.config.trainer.get("stream_train", False)
         train_future = None
+        batch_data_future = None
 
         def _start_stream_tasks():
             # 使用 RayQueue 进行流式训练传递
@@ -802,14 +803,20 @@ class OneStepOffRayTrainer(RayPPOTrainer):
             train_future_local = asyncio.create_task(self._consume_stream_and_train(stream_queue, stream_end_token))
             return batch_future, train_future_local
 
-        # Start the first asynchronous generation task.
-        if stream_train:
-            batch_data_future, train_future = _start_stream_tasks()
-            self.global_steps += 1           
-        else:
+        # Start the first asynchronous generation task (non-stream only).
+        if not stream_train:
             batch_data_future = asyncio.create_task(self._async_gen_next_batch(continuous_iterator))
 
-        while batch_data_future is not None:
+        while True:
+            if stream_train:
+                if self.global_steps >= self.total_training_steps:
+                    progress_bar.close()
+                    return
+                batch_data_future, train_future = _start_stream_tasks()
+                self.global_steps += 1
+            elif batch_data_future is None:
+                progress_bar.close()
+                return
             do_profile = (
                 self.global_steps in self.config.global_profiler.steps
                 if self.config.global_profiler.steps is not None
@@ -846,6 +853,12 @@ class OneStepOffRayTrainer(RayPPOTrainer):
                         batch = train_batch if train_batch is not None else gen_batch
                         metrics.update(train_metrics)
                         timing_raw.update(gen_batch.meta_info["timing"])
+                        log_with_rank(
+                            f"stream_step_ready: global_steps={self.global_steps} batch_size={len(batch)}",
+                            rank=0,
+                            logger=default_logger,
+                            log_only_rank_0=True,
+                        )
                     else:
                         _metrics, _timing_raw, epoch, batch, future_reward = await batch_data_future
                         timing_raw.update(batch.meta_info["timing"])
@@ -856,14 +869,12 @@ class OneStepOffRayTrainer(RayPPOTrainer):
                 # sync weights from actor to rollout
                 with marked_timer("sync_rollout_weights", timing_raw, color="purple"):
                     # self.sync_rollout_weights()
-                    await self.async_rollout_manager.clear_kv_cache()
+                    if not stream_train:
+                        await self.async_rollout_manager.clear_kv_cache()
 
                 # async next generation
-                if not is_last_step:
-                    if stream_train:
-                        batch_data_future, train_future = _start_stream_tasks()
-                    else:
-                        batch_data_future = asyncio.create_task(self._async_gen_next_batch(continuous_iterator))
+                if not is_last_step and not stream_train:
+                    batch_data_future = asyncio.create_task(self._async_gen_next_batch(continuous_iterator))
                     await asyncio.sleep(0)
 
                 if not stream_train:
@@ -1075,8 +1086,14 @@ class OneStepOffRayTrainer(RayPPOTrainer):
             # TODO: make a canonical logger that supports various backend
             logger.log(data=metrics, step=self.global_steps)
 
+            if stream_train:
+                await self.async_rollout_manager.clear_kv_cache()
+                if hasattr(self.async_rollout_manager, "wait_for_requests_to_drain"):
+                    await self.async_rollout_manager.wait_for_requests_to_drain()
+
             progress_bar.update(1)
-            self.global_steps += 1
+            if not stream_train:
+                self.global_steps += 1
 
             if (
                 hasattr(self.config.actor_rollout_ref.actor, "profiler")

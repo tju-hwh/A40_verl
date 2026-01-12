@@ -421,6 +421,7 @@ class AgentLoopWorkerBase:
             abort_counts = [0]
         abort_counts = {int(v) for v in abort_counts}
         zero_uid_canceled = False
+        end_token_sent = False
         for i in range(len(batch)):
             trace_this_sample = i in traced_indices
             kwargs = {k: v[i] for k, v in batch.non_tensor_batch.items()}
@@ -476,23 +477,24 @@ class AgentLoopWorkerBase:
                             logger=default_logger,
                             log_only_rank_0=True,
                         )
-                        zero_uids = {k for k, v in uid_counts.items() if v in abort_counts}
                         abort_request_ids = [
-                            rid
-                            for t, rid in task_request_id_map.items()
-                            if not t.done() and task_uid_map.get(t) in zero_uids
+                            rid for t, rid in task_request_id_map.items() if not t.done()
                         ]
-                        for pending in tasks:
-                            if not pending.done() and task_uid_map.get(pending) in zero_uids:
-                                pending.cancel()
-                        stop_requested = True
-                        asyncio.create_task(self.server_manager.abort_requests(abort_request_ids))
                         log_with_rank(
-                            f"canceled_zero_uid_count={len(zero_uids)}",
+                            f"canceled_zero_uid_count={len(abort_request_ids)}",
                             rank=0,
                             logger=default_logger,
                             log_only_rank_0=True,
                         )
+                        for pending in tasks:
+                            if not pending.done():
+                                pending.cancel()
+                        stop_requested = True
+                        asyncio.create_task(self.server_manager.abort_requests(abort_request_ids))
+                        if stream_queue is not None and stream_end_token is not None and not end_token_sent:
+                            await asyncio.to_thread(stream_queue.put, stream_end_token)
+                            end_token_sent = True
+                        break
             if stream_queue is not None:
                 # 每完成一个样本就推送到队列
                 stream_output = self._postprocess([result])
@@ -533,7 +535,7 @@ class AgentLoopWorkerBase:
             #     finished_in_group = 0
             #     tokens_in_group = 0
 
-        if stream_queue is not None and stream_end_token is not None:
+        if stream_queue is not None and stream_end_token is not None and not end_token_sent:
             # 结束符交由上层统一推送
             await asyncio.to_thread(stream_queue.put, stream_end_token)
 

@@ -585,6 +585,9 @@ class vLLMReplica(RolloutReplica):
         await self.servers[0].wait_for_requests_to_drain.remote()
         await asyncio.gather(*[server.sleep.remote() for server in self.servers])
 
+    async def wait_for_requests_to_drain(self):
+        await self.servers[0].wait_for_requests_to_drain.remote()
+
 
 def _qwen2_5_vl_dedup_image_tokens(prompt_ids: list[int], processor):
     """Deduplicate consecutive image tokens in prompt_ids for Qwen2.5-VL, since vLLM will replicate the

@@ -109,3 +109,6 @@ class OneStepOffAgentLoopManager(AgentLoopManager):
 
     async def clear_kv_cache(self):
         await asyncio.gather(*[replica.clear_kv_cache() for replica in self.rollout_replicas])
+
+    async def wait_for_requests_to_drain(self):
+        await asyncio.gather(*[replica.wait_for_requests_to_drain() for replica in self.rollout_replicas])
