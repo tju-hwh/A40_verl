@@ -69,9 +69,9 @@ python3 -m recipe.one_step_off_policy.main_ppo \
     trainer.total_training_steps=4 \
     trainer.nnodes="${NNODES}" \
     trainer.stream_train=True \
-    trainer.stream_max_samples=128 \
-    trainer.stream_abort_counts=[0,1] \
+    trainer.stream_max_samples=[64,128] \
+    trainer.stream_abort_counts=[[0],[0,1,2,3]] \
     actor_rollout_ref.rollout.agent.num_workers=1 \
     trainer.n_gpus_per_node="${n_gpus_training}" \
     rollout.nnodes="${NNODES}" \
-    rollout.n_gpus_per_node="${n_gpus_rollout}" $@ > ./log/log_mps_06_2.log
+    rollout.n_gpus_per_node="${n_gpus_rollout}" $@ > ./log/log_mps_06_3.log

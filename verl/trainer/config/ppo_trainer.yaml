@@ -211,8 +211,10 @@ trainer:
   # whether to enable streaming training (actor only)
   stream_train: False
   # stop streaming generation after N samples (null to disable)
+  # can be int or list (e.g. [32, 64, 128])
   stream_max_samples: null
-  # abort uids whose completed rollout count is in this list
+  # abort uids whose completed rollout count is in this list (or list of lists for staged thresholds)
+  # e.g. [[0], [0,1], [0,1,2,3]]
   stream_abort_counts: [0]
 
 # profiler configs

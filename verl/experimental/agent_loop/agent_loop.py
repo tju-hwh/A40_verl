@@ -27,6 +27,7 @@ import ray
 import torch
 from cachetools import LRUCache
 from omegaconf import DictConfig, OmegaConf
+from omegaconf import ListConfig
 from pydantic import BaseModel, ConfigDict
 from tensordict import TensorDict
 from transformers import AutoProcessor, AutoTokenizer
@@ -416,11 +417,19 @@ class AgentLoopWorkerBase:
         uid_counts = {uid: 0 for uid in uids} if uids is not None else None
         rollout_n = int(self.config.actor_rollout_ref.rollout.n)
         stream_max_samples = self.config.trainer.get("stream_max_samples", None)
-        abort_counts = self.config.trainer.get("stream_abort_counts", [0])
-        if abort_counts is None:
-            abort_counts = [0]
-        abort_counts = {int(v) for v in abort_counts}
-        zero_uid_canceled = False
+        stream_abort_counts = self.config.trainer.get("stream_abort_counts", None)
+        if stream_max_samples is not None and not isinstance(stream_max_samples, (list, ListConfig)):
+            stream_max_samples = [int(stream_max_samples)]
+        if stream_abort_counts is None:
+            stream_abort_counts = [[0]] if stream_max_samples is not None else [0]
+        if isinstance(stream_abort_counts, ListConfig):
+            stream_abort_counts = list(stream_abort_counts)
+        if stream_max_samples is None:
+            abort_counts = {int(v) for v in stream_abort_counts}
+            stream_stage_idx = None
+        else:
+            stream_max_samples = [int(v) for v in list(stream_max_samples)]
+            stream_stage_idx = 0
         end_token_sent = False
         for i in range(len(batch)):
             trace_this_sample = i in traced_indices
@@ -461,12 +470,24 @@ class AgentLoopWorkerBase:
                 uid = result.extra_fields.get("uid")
                 if uid is not None and uid in uid_counts:
                     uid_counts[uid] += 1
-                    if (
-                        not zero_uid_canceled
-                        and stream_max_samples is not None
-                        and sum(1 for v in uid_counts.values() if v >= rollout_n) >= int(stream_max_samples)
-                    ):
-                        zero_uid_canceled = True
+                    completed_full = sum(1 for v in uid_counts.values() if v >= rollout_n)
+                    should_trigger = False
+                    abort_counts = None
+                    abort_uids = None
+                    stop_all = False
+                    if stream_stage_idx is None and stream_max_samples is not None:
+                        if completed_full > stream_max_samples[0]:
+                            should_trigger = True
+                            abort_counts = {int(v) for v in stream_abort_counts}
+                            stop_all = True
+                    elif stream_stage_idx is not None:
+                        if stream_stage_idx < len(stream_max_samples) and completed_full > stream_max_samples[stream_stage_idx]:
+                            should_trigger = True
+                            abort_counts = {int(v) for v in stream_abort_counts[stream_stage_idx]}
+                            stop_all = stream_stage_idx == len(stream_max_samples) - 1
+                            stream_stage_idx += 1
+
+                    if should_trigger:
                         sorted_counts = sorted(
                             ((str(k), v) for k, v in uid_counts.items()),
                             key=lambda x: (-x[1], x[0]),
@@ -477,24 +498,31 @@ class AgentLoopWorkerBase:
                             logger=default_logger,
                             log_only_rank_0=True,
                         )
-                        abort_request_ids = [
-                            rid for t, rid in task_request_id_map.items() if not t.done()
-                        ]
+                        abort_uids = {k for k, v in uid_counts.items() if v in abort_counts}
+                        if stop_all:
+                            abort_request_ids = [rid for t, rid in task_request_id_map.items() if not t.done()]
+                        else:
+                            abort_request_ids = [
+                                rid
+                                for t, rid in task_request_id_map.items()
+                                if not t.done() and task_uid_map.get(t) in abort_uids
+                            ]
                         log_with_rank(
-                            f"canceled_zero_uid_count={len(abort_request_ids)}",
+                            f"canceled_zero_uid_count={len(abort_uids)}",
                             rank=0,
                             logger=default_logger,
                             log_only_rank_0=True,
                         )
                         for pending in tasks:
-                            if not pending.done():
+                            if not pending.done() and (stop_all or task_uid_map.get(pending) in abort_uids):
                                 pending.cancel()
                         stop_requested = True
                         asyncio.create_task(self.server_manager.abort_requests(abort_request_ids))
-                        if stream_queue is not None and stream_end_token is not None and not end_token_sent:
-                            await asyncio.to_thread(stream_queue.put, stream_end_token)
-                            end_token_sent = True
-                        break
+                        if stop_all:
+                            if stream_queue is not None and stream_end_token is not None and not end_token_sent:
+                                await asyncio.to_thread(stream_queue.put, stream_end_token)
+                                end_token_sent = True
+                            break
             if stream_queue is not None:
                 # 每完成一个样本就推送到队列
                 stream_output = self._postprocess([result])

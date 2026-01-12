@@ -477,7 +477,9 @@ class OneStepOffRayTrainer(RayPPOTrainer):
         # train_group_plan = all_train_group_plans[plan_cycle_idx % len(all_train_group_plans)]
         # self._train_group_plan_idx = plan_cycle_idx + 1
         # print(train_group_plan)
+        
         train_group_plan= [8] * 20 
+        # train_group_plan= [8] * 10 + [32] * 4 
 
         while True:
             item = await asyncio.to_thread(stream_queue.get)
