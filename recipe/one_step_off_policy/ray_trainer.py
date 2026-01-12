@@ -457,7 +457,7 @@ class OneStepOffRayTrainer(RayPPOTrainer):
         zero_grad = True
         b_id_counter = 0
         # 每次训练触发阈值（以 rollout 分组个数计），按顺序消费
-        train_group_plan = [2, 2, 4, 4, 4] + [8] * 13 + [4, 4]
+        train_group_plan = [4, 4, 4, 4] + [8] * 13 + [4, 4]
         plan_idx = 0
 
         while True:
