@@ -212,6 +212,8 @@ trainer:
   stream_train: False
   # stop streaming generation after N samples (null to disable)
   stream_max_samples: null
+  # abort uids whose completed rollout count is in this list
+  stream_abort_counts: [0]
 
 # profiler configs
 global_profiler:

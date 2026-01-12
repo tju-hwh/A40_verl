@@ -477,7 +477,7 @@ class OneStepOffRayTrainer(RayPPOTrainer):
         # train_group_plan = all_train_group_plans[plan_cycle_idx % len(all_train_group_plans)]
         # self._train_group_plan_idx = plan_cycle_idx + 1
         # print(train_group_plan)
-        train_group_plan=[8] * 30
+        train_group_plan= [8] * 2 + [16] * 20
 
         while True:
             item = await asyncio.to_thread(stream_queue.get)
@@ -614,6 +614,14 @@ class OneStepOffRayTrainer(RayPPOTrainer):
         if "response_mask" not in batch.batch.keys():
             batch.batch["response_mask"] = compute_response_mask(batch)
         if self.config.trainer.balance_batch:
+            # Randomly drop a small remainder to make batch size divisible by DP world size.
+            world_size = int(self.config.trainer.n_gpus_per_node)
+            remainder = len(batch) % world_size
+            if remainder != 0:
+                drop_idxs = np.random.choice(len(batch), size=remainder, replace=False).tolist()
+                keep_mask = np.ones(len(batch), dtype=bool)
+                keep_mask[drop_idxs] = False
+                batch = batch.select_idxs(keep_mask)
             self._balance_batch(batch, metrics=metrics)
 
         batch.meta_info["global_token_num"] = torch.sum(batch.batch["attention_mask"], dim=-1).tolist()

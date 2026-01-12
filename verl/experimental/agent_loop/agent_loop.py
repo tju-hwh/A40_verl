@@ -416,6 +416,10 @@ class AgentLoopWorkerBase:
         uid_counts = {uid: 0 for uid in uids} if uids is not None else None
         rollout_n = int(self.config.actor_rollout_ref.rollout.n)
         stream_max_samples = self.config.trainer.get("stream_max_samples", None)
+        abort_counts = self.config.trainer.get("stream_abort_counts", [0])
+        if abort_counts is None:
+            abort_counts = [0]
+        abort_counts = {int(v) for v in abort_counts}
         zero_uid_canceled = False
         for i in range(len(batch)):
             trace_this_sample = i in traced_indices
@@ -472,7 +476,7 @@ class AgentLoopWorkerBase:
                             logger=default_logger,
                             log_only_rank_0=True,
                         )
-                        zero_uids = {k for k, v in uid_counts.items() if v == 0}
+                        zero_uids = {k for k, v in uid_counts.items() if v in abort_counts}
                         abort_request_ids = [
                             rid
                             for t, rid in task_request_id_map.items()
@@ -496,9 +500,10 @@ class AgentLoopWorkerBase:
                 # 每完成一个样本就打印日志
                 global_steps = batch.meta_info.get("global_steps", -1)
                 num_tokens = result.extra_fields.get("num_tokens", -1)
+                uid = result.extra_fields.get("uid", "unknown")
                 current_time = time.strftime("%Y-%m-%d %H:%M:%S")
                 log_with_rank(
-                    f"global_steps={global_steps} sample_tokens={num_tokens} current time {current_time}",
+                    f"global_steps={global_steps} uid={uid} sample_tokens={num_tokens} current time {current_time}",
                     rank=0,
                     logger=default_logger,
                     log_only_rank_0=True,

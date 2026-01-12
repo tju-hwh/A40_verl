@@ -29,7 +29,7 @@ python3 -m recipe.one_step_off_policy.main_ppo \
     data.val_files="${TEST_FILE}" \
     data.train_batch_size=160 \
     data.max_prompt_length=1024 \
-    data.max_response_length=3072 \
+    data.max_response_length=8192 \
     data.filter_overlong_prompts=True \
     data.truncation='error' \
     actor_rollout_ref.actor.strategy=fsdp2 \
@@ -50,7 +50,7 @@ python3 -m recipe.one_step_off_policy.main_ppo \
     actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=${micro_batch_size} \
     actor_rollout_ref.rollout.tensor_model_parallel_size=4 \
     actor_rollout_ref.rollout.name=vllm \
-    actor_rollout_ref.rollout.gpu_memory_utilization=0.3 \
+    actor_rollout_ref.rollout.gpu_memory_utilization=0.25 \
     actor_rollout_ref.rollout.n=4 \
     actor_rollout_ref.rollout.load_format=safetensors \
     actor_rollout_ref.rollout.layered_summon=True \
@@ -66,10 +66,11 @@ python3 -m recipe.one_step_off_policy.main_ppo \
     trainer.save_freq=0 \
     trainer.test_freq=0 \
     trainer.total_epochs=1 \
-    trainer.total_training_steps=4 \
+    trainer.total_training_steps=3 \
     trainer.nnodes="${NNODES}" \
     trainer.stream_train=True \
-    trainer.stream_max_samples=40 \
+    trainer.stream_max_samples=32 \
+    trainer.stream_abort_counts=[0,1] \
     actor_rollout_ref.rollout.agent.num_workers=1 \
     trainer.n_gpus_per_node="${n_gpus_training}" \
     rollout.nnodes="${NNODES}" \
