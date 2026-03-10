@@ -30,8 +30,6 @@ from verl.trainer.ppo.ray_trainer import ResourcePoolManager
 from verl.trainer.ppo.reward import load_reward_manager
 from verl.trainer.ppo.utils import Role, need_reference_policy
 from verl.utils.config import validate_config
-
-
 def create_resource_pool_manager(config, roles: list) -> ResourcePoolManager:
     """
     Create resource pool manager
@@ -108,8 +106,8 @@ def create_role_worker_mapping(config):
 
     role_worker_mapping = {
         Role.Actor: ray.remote(DetachActorWorker),
-        Role.Rollout: ray.remote(DetachAsyncRolloutWorker),
         Role.Critic: ray.remote(CriticWorker),
+        Role.Rollout: ray.remote(DetachAsyncRolloutWorker),
     }
 
     if config.reward_model.enable:

@@ -62,7 +62,6 @@ from verl.utils.tracking import ValidationGenerationsLogger
 import os
 from verl.utils.logger import default_logger, log_with_rank
 import time
-
 class OneStepOffRayTrainer(RayPPOTrainer):
     # TODO: support each role have individual ray_worker_group_cls,
     # i.e., support different backend of different role
@@ -132,12 +131,6 @@ class OneStepOffRayTrainer(RayPPOTrainer):
 
         self._create_dataloader(train_dataset, val_dataset, collate_fn, train_sampler)
 
-    def _validate(self):
-        self.actor_rollout_wg = self.rollout_wg
-        ret = super()._validate()
-        self.actor_rollout_wg = self.actor_wg
-        return ret
-
     def init_workers(self):
         """Initialize distributed training workers using Ray backend.
 
@@ -145,28 +138,11 @@ class OneStepOffRayTrainer(RayPPOTrainer):
         1. Ray resource pools from configuration
         2. Worker groups for each role (actor, critic, etc.)
         """
-        if os.environ.get("mylog") == "1":
-            print("enter init_workers 0")
         self._init_resource_pools()
-        
-        if os.environ.get("mylog") == "1":
-            print("enter init_workers 1")
         self._create_worker_classes()
-        
-        if os.environ.get("mylog") == "1":
-            print("enter init_workers 2")
         self._init_worker_groups()
-        
-        if os.environ.get("mylog") == "1":
-            print("enter init_workers 3")
         self._init_models()
-        
-        if os.environ.get("mylog") == "1":
-            print("enter init_workers 4")
         self._init_async_rollout_manager()
-        
-        if os.environ.get("mylog") == "1":
-            print("enter init_workers 5")
 
     def _init_resource_pools(self):
         self.resource_pool_manager.create_resource_pool()
@@ -262,13 +238,6 @@ class OneStepOffRayTrainer(RayPPOTrainer):
 
             
             
-            if os.environ.get("mylog") == "1":
-                roles = ",".join(class_dict.keys())
-                print(
-                    f"mylog [init_worker_groups] loop {idx}, roles={roles}, "
-                    f"resource_pool={resource_pool}, class_dict={class_dict}"
-                )
-            
             # my mps control ---
             wg_kwargs_local = dict(wg_kwargs)
             rollout_worker_env = self.config.actor_rollout_ref.rollout.get("worker_env", None)
@@ -278,11 +247,6 @@ class OneStepOffRayTrainer(RayPPOTrainer):
             # my mps control ---end
                 
             worker_dict_cls = create_colocated_worker_cls(class_dict=class_dict)
-            if os.environ.get("mylog") == "1":
-                roles = ",".join(class_dict.keys())
-                print(
-                    f"mylog [init_worker_groups] loop {idx}, roles={roles}, create_colocated_worker_cls success"
-                )
             wg_dict = self.ray_worker_group_cls(
                 resource_pool=resource_pool,
                 ray_cls_with_init=worker_dict_cls,
@@ -307,8 +271,8 @@ class OneStepOffRayTrainer(RayPPOTrainer):
             self.rm_wg.init_model()
 
         self.actor_wg = self.all_wg[str(Role.Actor)]
-        self.rollout_wg = self.all_wg[str(Role.Rollout)]
         self.actor_wg.init_model()
+        self.rollout_wg = self.all_wg[str(Role.Rollout)]
         self.rollout_wg.init_model()
         self.actor_rollout_wg = self.actor_wg
         weights_info = self.actor_wg.get_actor_weights_info()[0]
@@ -318,6 +282,7 @@ class OneStepOffRayTrainer(RayPPOTrainer):
     def _create_weight_sync_group(self):
         # TODO: NPU support
         from verl.utils.device import get_nccl_backend
+        assert self.rollout_wg is not None
 
         actor_rollout_workers = self.actor_wg.workers + self.rollout_wg.workers
         n_workers = len(actor_rollout_workers)
@@ -456,8 +421,10 @@ class OneStepOffRayTrainer(RayPPOTrainer):
         train_buffer_count = 0
         zero_grad = True
         b_id_counter = 0
+        wait_for_group_start_time = time.time()
         # 每次训练触发阈值（以 rollout 分组个数计），按顺序消费
-        train_group_plan = [4, 4, 4, 4] + [8] * 13 + [4, 4]
+        # train_group_plan = [4, 4, 4, 4] + [8] * 13 + [4, 4]
+        train_group_plan = [32] * 4
         plan_idx = 0
 
         while True:
@@ -482,9 +449,41 @@ class OneStepOffRayTrainer(RayPPOTrainer):
                     target_groups = train_group_plan[plan_idx]
                     if train_buffer_count >= target_groups * rollout_n:
                     # if True:
+                        current_time = time.strftime("%Y-%m-%d %H:%M:%S")
+                        waited_s = time.time() - wait_for_group_start_time
+                        log_with_rank(
+                            (
+                                f"global_steps={self.global_steps} b_id={b_id_counter} "
+                                f"stream_group_ready waited_s={waited_s:.3f} "
+                                f"target_groups={target_groups} train_buffer_count={train_buffer_count} "
+                                f"current time {current_time}"
+                            ),
+                            rank=0,
+                            logger=default_logger,
+                            log_only_rank_0=True,
+                        )
                         # 达到 temp_o 才统一计算 reward/logprob/advantage 并训练
+                        prep_start = time.time()
+                        prep_start_str = time.strftime("%Y-%m-%d %H:%M:%S")
+                        log_with_rank(
+                            f"global_steps={self.global_steps} b_id={b_id_counter} prepare_batch_start={prep_start_str}",
+                            rank=0,
+                            logger=default_logger,
+                            log_only_rank_0=True,
+                        )
                         train_batch_raw = DataProto.concat(train_buffer)
                         prepared, prep_metrics = self._prepare_batch_for_training(train_batch_raw)
+                        prep_end = time.time()
+                        prep_end_str = time.strftime("%Y-%m-%d %H:%M:%S")
+                        log_with_rank(
+                            (
+                                f"global_steps={self.global_steps} b_id={b_id_counter} "
+                                f"prepare_batch_end={prep_end_str} prep_s={prep_end - prep_start:.3f}"
+                            ),
+                            rank=0,
+                            logger=default_logger,
+                            log_only_rank_0=True,
+                        )
                         # 复制一份用于指标，避免后续写入 meta_info 引发冲突
                         processed_batches.append(prepared.select(deepcopy=True))
                         for key, value in prep_metrics.items():
@@ -508,6 +507,7 @@ class OneStepOffRayTrainer(RayPPOTrainer):
                         zero_grad = False
                         train_buffer = []
                         train_buffer_count = 0
+                        wait_for_group_start_time = time.time()
                         print(f"target_groups: {target_groups}")
                         plan_idx += 1
 
@@ -521,8 +521,27 @@ class OneStepOffRayTrainer(RayPPOTrainer):
             )
                 
             # step 结束时把剩余 buffer 统一计算并执行 optimizer.step()
+            prep_start = time.time()
+            prep_start_str = time.strftime("%Y-%m-%d %H:%M:%S")
+            log_with_rank(
+                f"global_steps={self.global_steps} b_id={b_id_counter} prepare_batch_start={prep_start_str}",
+                rank=0,
+                logger=default_logger,
+                log_only_rank_0=True,
+            )
             train_batch_raw = DataProto.concat(train_buffer)
             prepared, prep_metrics = self._prepare_batch_for_training(train_batch_raw)
+            prep_end = time.time()
+            prep_end_str = time.strftime("%Y-%m-%d %H:%M:%S")
+            log_with_rank(
+                (
+                    f"global_steps={self.global_steps} b_id={b_id_counter} "
+                    f"prepare_batch_end={prep_end_str} prep_s={prep_end - prep_start:.3f}"
+                ),
+                rank=0,
+                logger=default_logger,
+                log_only_rank_0=True,
+            )
             # 复制一份用于指标，避免后续写入 meta_info 引发冲突
             processed_batches.append(prepared.select(deepcopy=True))
             for key, value in prep_metrics.items():

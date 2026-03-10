@@ -99,7 +99,8 @@ class DetachSync(AsyncActorRolloutRefWorker):
 
             if self._is_rollout:
                 if rollout_name == "vllm":
-                    inference_model.load_weights([(key, tensor)])
+                    if inference_model is not None:
+                        inference_model.load_weights([(key, tensor)])
                 elif rollout_name == "sglang":
                     # first_rank_in_node = self._tp_rank % tp_size_per_node == 0，
                     # Only the first rank within each node (i.e., the local rank is 0) initializes the engine;

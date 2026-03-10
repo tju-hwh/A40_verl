@@ -16,6 +16,7 @@ import heapq
 import logging
 import os
 import random
+import threading
 import time
 from abc import ABC, abstractmethod
 from typing import Any, Optional
@@ -50,8 +51,6 @@ from verl.workers.rollout.replica import TokenOutput, get_rollout_replica_class
 
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
-
-
 class AsyncLLMServerManager:
     """
     A class to manage multiple OpenAI compatible LLM servers. This class provides
@@ -930,5 +929,22 @@ class AgentLoopManager:
     def _run_all(self, tasks: list[asyncio.Task]):
         async def run_all():
             await asyncio.gather(*tasks)
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            asyncio.run(run_all())
+            return
 
-        asyncio.run(run_all())
+        err: list[BaseException] = []
+
+        def _worker():
+            try:
+                asyncio.run(run_all())
+            except BaseException as exc:  # pragma: no cover
+                err.append(exc)
+
+        t = threading.Thread(target=_worker, daemon=True)
+        t.start()
+        t.join()
+        if err:
+            raise err[0]
