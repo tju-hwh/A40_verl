@@ -424,7 +424,7 @@ class OneStepOffRayTrainer(RayPPOTrainer):
         wait_for_group_start_time = time.time()
         # 每次训练触发阈值（以 rollout 分组个数计），按顺序消费
         # train_group_plan = [4, 4, 4, 4] + [8] * 13 + [4, 4]
-        train_group_plan = [32] * 4
+        train_group_plan = [16] * 8
         plan_idx = 0
 
         while True:
@@ -562,6 +562,140 @@ class OneStepOffRayTrainer(RayPPOTrainer):
             reduced = reduce_metrics(actor_output.meta_info["metrics"])
             for key, value in reduced.items():
                 metrics_across_chunks.setdefault(key, []).append(value)
+
+        if processed_batches:
+            batch_for_metrics = DataProto.concat(processed_batches)
+            batch_for_metrics.meta_info["global_token_num"] = torch.sum(
+                batch_for_metrics.batch["attention_mask"], dim=-1
+            ).tolist()
+        else:
+            batch_for_metrics = None
+
+        return reduce_metrics(metrics_across_chunks), batch_for_metrics
+
+    async def _consume_stream_and_train_pipe(self, stream_queue: RayQueue, stream_end_token) -> tuple[dict, DataProto | None]:
+        rollout_n = self.config.actor_rollout_ref.rollout.n
+        uid_buffer: dict[str, list[DataProto]] = {}
+        train_buffer: list[DataProto] = []
+        processed_batches: list[DataProto] = []
+        metrics_across_chunks: dict[str, list] = {}
+        train_buffer_count = 0
+        zero_grad = True
+        b_id_counter = 0
+        wait_for_group_start_time = time.time()
+        train_group_plan = [16] * 8
+        # train_group_plan = [4, 4] + [8] * 14 + [4, 4]
+        plan_idx = 0
+        prepared_queue: asyncio.Queue = asyncio.Queue()
+
+        async def _prepare_job(train_batch_raw: DataProto, batch_id: int):
+            prep_start = time.time()
+            prep_start_str = time.strftime("%Y-%m-%d %H:%M:%S")
+            log_with_rank(
+                f"global_steps={self.global_steps} b_id={batch_id} prepare_batch_start={prep_start_str}",
+                rank=0,
+                logger=default_logger,
+                log_only_rank_0=True,
+            )
+            prepared, prep_metrics = await asyncio.to_thread(self._prepare_batch_for_training, train_batch_raw)
+            prep_end = time.time()
+            prep_end_str = time.strftime("%Y-%m-%d %H:%M:%S")
+            log_with_rank(
+                (
+                    f"global_steps={self.global_steps} b_id={batch_id} "
+                    f"prepare_batch_end={prep_end_str} prep_s={prep_end - prep_start:.3f}"
+                ),
+                rank=0,
+                logger=default_logger,
+                log_only_rank_0=True,
+            )
+            return prepared, prep_metrics
+
+        async def _update_worker():
+            while True:
+                item = await prepared_queue.get()
+                if item is None:
+                    break
+                batch_id, zero_grad_flag, step_optimizer_flag, prep_task = item
+                prepared, prep_metrics = await prep_task
+                processed_batches.append(prepared.select(deepcopy=True))
+                for key, value in prep_metrics.items():
+                    metrics_across_chunks.setdefault(key, []).append(value)
+
+                prepared.meta_info["global_token_num"] = torch.sum(
+                    prepared.batch["attention_mask"], dim=-1
+                ).tolist()
+                prepared.meta_info["multi_turn"] = self.config.actor_rollout_ref.rollout.multi_turn.enable
+                prepared.meta_info["temperature"] = self.config.actor_rollout_ref.rollout.temperature
+                prepared.meta_info["stream_zero_grad"] = zero_grad_flag
+                prepared.meta_info["stream_step_optimizer"] = step_optimizer_flag
+                prepared.meta_info["stream_batch_id"] = batch_id
+                prepared.meta_info["stream_global_steps"] = self.global_steps
+
+                actor_output = self.actor_rollout_wg.update_actor_stream(prepared)
+                reduced = reduce_metrics(actor_output.meta_info["metrics"])
+                for key, value in reduced.items():
+                    metrics_across_chunks.setdefault(key, []).append(value)
+
+        update_worker_task = asyncio.create_task(_update_worker())
+
+        while True:
+            item = await asyncio.to_thread(stream_queue.get)
+            if item == stream_end_token:
+                break
+
+            chunk: DataProto = item
+            uids = chunk.non_tensor_batch["uid"]
+            for idx in range(len(chunk)):
+                uid = uids[idx]
+                uid_list = uid_buffer.setdefault(uid, [])
+                uid_list.append(chunk.select_idxs([idx]))
+                if len(uid_list) == rollout_n:
+                    group_batch = DataProto.concat(uid_list)
+                    uid_buffer.pop(uid, None)
+                    train_buffer.append(group_batch)
+                    train_buffer_count += len(group_batch)
+                    target_groups = train_group_plan[plan_idx]
+                    if train_buffer_count >= target_groups * rollout_n:
+                        current_time = time.strftime("%Y-%m-%d %H:%M:%S")
+                        waited_s = time.time() - wait_for_group_start_time
+                        log_with_rank(
+                            (
+                                f"global_steps={self.global_steps} b_id={b_id_counter} "
+                                f"stream_group_ready waited_s={waited_s:.3f} "
+                                f"target_groups={target_groups} train_buffer_count={train_buffer_count} "
+                                f"current time {current_time}"
+                            ),
+                            rank=0,
+                            logger=default_logger,
+                            log_only_rank_0=True,
+                        )
+                        train_batch_raw = DataProto.concat(train_buffer)
+                        prep_task = asyncio.create_task(_prepare_job(train_batch_raw, b_id_counter))
+                        await prepared_queue.put((b_id_counter, zero_grad, False, prep_task))
+                        zero_grad = False
+                        b_id_counter += 1
+                        train_buffer = []
+                        train_buffer_count = 0
+                        wait_for_group_start_time = time.time()
+                        print(f"target_groups: {target_groups}")
+                        plan_idx += 1
+
+        if train_buffer:
+            current_time = time.strftime("%Y-%m-%d %H:%M:%S")
+            log_with_rank(
+                f"train_buffer has triggerd! current time {current_time}",
+                rank=0,
+                logger=default_logger,
+                log_only_rank_0=True,
+            )
+            train_batch_raw = DataProto.concat(train_buffer)
+            prep_task = asyncio.create_task(_prepare_job(train_batch_raw, b_id_counter))
+            await prepared_queue.put((b_id_counter, zero_grad, True, prep_task))
+            b_id_counter += 1
+
+        await prepared_queue.put(None)
+        await update_worker_task
 
         if processed_batches:
             batch_for_metrics = DataProto.concat(processed_batches)
@@ -775,6 +909,7 @@ class OneStepOffRayTrainer(RayPPOTrainer):
         continuous_iterator = self._create_continuous_iterator()
 
         stream_train = self.config.trainer.get("stream_train", False)
+        stream_train_pipe = self.config.trainer.get("stream_train_pipe", False)
         train_future = None
 
         def _start_stream_tasks():
@@ -784,7 +919,14 @@ class OneStepOffRayTrainer(RayPPOTrainer):
             batch_future = asyncio.create_task(
                 self._async_gen_next_batch_stream(continuous_iterator, stream_queue, stream_end_token)
             )
-            train_future_local = asyncio.create_task(self._consume_stream_and_train(stream_queue, stream_end_token))
+            if stream_train_pipe:
+                train_future_local = asyncio.create_task(
+                    self._consume_stream_and_train_pipe(stream_queue, stream_end_token)
+                )
+            else:
+                train_future_local = asyncio.create_task(
+                    self._consume_stream_and_train(stream_queue, stream_end_token)
+                )
             return batch_future, train_future_local
 
         # Start the first asynchronous generation task.

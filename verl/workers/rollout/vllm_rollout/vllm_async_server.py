@@ -846,7 +846,9 @@ class vLLMHttpServerBase:
                              stderr=subprocess.STDOUT)
         )
 
-        upstream_timeout_s = max(120.0, connect_timeout_s)
+        startup_timeout_s = float(
+            self._hop_cfg.get("startup_timeout_s", max(300.0, connect_timeout_s)))
+        upstream_timeout_s = max(startup_timeout_s, connect_timeout_s)
         for port in server_ports:
             ready = await _wait_http_ready(
                 f"http://{host}:{port}/v1/models", upstream_timeout_s)

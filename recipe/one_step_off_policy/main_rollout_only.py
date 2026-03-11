@@ -9,15 +9,18 @@ from pprint import pprint
 import hydra
 import numpy as np
 import ray
+import torch
 from omegaconf import OmegaConf
 from torch.utils.data import DataLoader
 
-from recipe.one_step_off_policy.agent_loop.agent_loop import OneStepOffAgentLoopManager
 from verl import DataProto
 from verl.trainer.main_ppo import create_rl_dataset, create_rl_sampler
 from verl.utils import hf_processor, hf_tokenizer
 from verl.utils.dataset.rl_dataset import collate_fn
 from verl.utils.fs import copy_to_local
+from verl.utils.torch_functional import pad_2d_list_to_length
+from verl.workers.rollout.replica import RolloutMode
+from verl.workers.rollout.vllm_rollout.vllm_async_server import vLLMHttpServer
 
 
 def _get_gen_batch(batch: DataProto) -> DataProto:
@@ -39,14 +42,12 @@ def _strip_pad(token_ids, pad_token_id):
     return [int(tok) for tok in ids if int(tok) != int(pad_token_id)]
 
 
-def _dump_rollout_samples(batch: DataProto, tokenizer, dump_path: str) -> None:
+def _dump_rollout_samples_from_ids(prompt_ids_list, response_ids_list, tokenizer, dump_path: str) -> None:
     pad_token_id = tokenizer.pad_token_id
-    input_ids = batch.batch["input_ids"].cpu().numpy()
-    responses = batch.batch["responses"].cpu().numpy()
     records = []
-    for idx in range(len(input_ids)):
-        prompt_ids = _strip_pad(input_ids[idx], pad_token_id)
-        response_ids = _strip_pad(responses[idx], pad_token_id)
+    for idx, (prompt_ids_raw, response_ids_raw) in enumerate(zip(prompt_ids_list, response_ids_list, strict=True)):
+        prompt_ids = _strip_pad(prompt_ids_raw, pad_token_id)
+        response_ids = _strip_pad(response_ids_raw, pad_token_id)
         records.append(
             {
                 "sample_index": idx,
@@ -57,6 +58,18 @@ def _dump_rollout_samples(batch: DataProto, tokenizer, dump_path: str) -> None:
         )
     with open(dump_path, "w", encoding="utf-8") as f:
         json.dump(records, f, ensure_ascii=False, indent=2)
+
+
+async def _generate_one(server, prompt_ids, sampling_params, request_id):
+    t0 = time.perf_counter()
+    output = await server.generate.remote(
+        prompt_ids=prompt_ids,
+        sampling_params=sampling_params,
+        request_id=request_id,
+        image_data=None,
+    )
+    elapsed = time.perf_counter() - t0
+    return output, elapsed
 
 
 async def _run_rollout(config) -> dict:
@@ -95,28 +108,83 @@ async def _run_rollout(config) -> dict:
     gen_batch.meta_info["global_steps"] = 1
     gen_batch = gen_batch.repeat(repeat_times=config.actor_rollout_ref.rollout.n, interleave=True)
 
-    rollout_manager = OneStepOffAgentLoopManager(config=config, worker_group=None, rm_resource_pool=None)
-    await rollout_manager.clear_kv_cache()
+    rollout_config = config.actor_rollout_ref.rollout
+    model_config = config.actor_rollout_ref.model
+    server = vLLMHttpServer.options(name=f"rollout_only_server_{uuid.uuid4().hex}").remote(
+        config=rollout_config,
+        model_config=model_config,
+        rollout_mode=RolloutMode.STANDALONE,
+        workers=[],
+        replica_rank=0,
+        node_rank=0,
+        gpus_per_node=config.trainer.n_gpus_per_node,
+        nnodes=1,
+    )
+    await server.launch_server.remote()
+    await server.clear_kv_cache.remote()
 
+    pad_token_id = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else tokenizer.eos_token_id
+    prompt_ids_list = [
+        _strip_pad(prompt_ids, pad_token_id)
+        for prompt_ids in gen_batch.batch["input_ids"].cpu().numpy()
+    ]
+    sampling_params = {
+        "max_tokens": int(config.data.max_response_length),
+        "temperature": float(rollout_config.temperature),
+        "top_p": float(rollout_config.top_p),
+        "top_k": int(rollout_config.top_k),
+        "stop": [],
+        "logprobs": False,
+    }
+
+    request_ids = [str(uuid.uuid4()) for _ in prompt_ids_list]
     t0 = time.perf_counter()
-    gen_batch_output = await rollout_manager.generate_sequences_async(gen_batch)
+    outputs = await asyncio.gather(
+        *[
+            _generate_one(server, prompt_ids, sampling_params, request_id)
+            for prompt_ids, request_id in zip(prompt_ids_list, request_ids, strict=True)
+        ]
+    )
     elapsed = time.perf_counter() - t0
 
+    token_outputs = [x[0] for x in outputs]
+    latencies = [float(x[1]) for x in outputs]
+    response_ids = [out.token_ids for out in token_outputs]
+    responses = pad_2d_list_to_length(
+        response_ids,
+        pad_token_id,
+        max_length=int(config.data.max_response_length),
+    ).to(dtype=torch.long)
+
     batch = batch.repeat(repeat_times=config.actor_rollout_ref.rollout.n, interleave=True)
-    batch = batch.union(gen_batch_output)
-    metrics = gen_batch_output.meta_info.get("timing", {})
+    batch.batch["responses"] = responses
     response_len = batch.batch["responses"].shape[-1] if "responses" in batch.batch else -1
     dump_path = f"/tmp/rollout_only_samples_{int(time.time())}.json"
-    _dump_rollout_samples(batch, tokenizer, dump_path)
+    _dump_rollout_samples_from_ids(prompt_ids_list, response_ids, tokenizer, dump_path)
 
-    await rollout_manager.clear_kv_cache()
-    await rollout_manager.sleep()
+    await server.clear_kv_cache.remote()
+    await server.sleep.remote()
+    ray.kill(server, no_restart=True)
+
+    slowest_idx = int(np.argmax(latencies)) if latencies else -1
+    metrics = {
+        "agent_loop/generate_sequences/min": float(min(latencies)) if latencies else 0.0,
+        "agent_loop/generate_sequences/max": float(max(latencies)) if latencies else 0.0,
+        "agent_loop/generate_sequences/mean": float(np.mean(latencies)) if latencies else 0.0,
+        "agent_loop/tool_calls/min": 0.0,
+        "agent_loop/tool_calls/max": 0.0,
+        "agent_loop/tool_calls/mean": 0.0,
+        "agent_loop/slowest/generate_sequences": float(max(latencies)) if latencies else 0.0,
+        "agent_loop/slowest/tool_calls": 0.0,
+        "agent_loop/slowest/prompt_length": int(len(prompt_ids_list[slowest_idx])) if slowest_idx >= 0 else 0,
+        "agent_loop/slowest/response_length": int(len(response_ids[slowest_idx])) if slowest_idx >= 0 else 0,
+    }
 
     return {
         "epoch": 0,
         "wall_time_s": float(elapsed),
-        "prompt_count": int(len(batch.batch["input_ids"]) // config.actor_rollout_ref.rollout.n),
-        "sample_count": int(len(batch.batch["input_ids"])),
+        "prompt_count": int(len(prompt_ids_list) // config.actor_rollout_ref.rollout.n),
+        "sample_count": int(len(prompt_ids_list)),
         "rollout_n": int(config.actor_rollout_ref.rollout.n),
         "response_tensor_len": int(response_len),
         "timing_raw": {"generate_async": float(elapsed)},
