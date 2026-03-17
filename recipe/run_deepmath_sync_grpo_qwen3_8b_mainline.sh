@@ -32,8 +32,8 @@ NGPUS_PER_NODE=${NGPUS_PER_NODE:-4}
 # - gpu_memory_utilization=0.6
 # - max_model_len=max(12288, prompt_len + 8192 + 256), which is 12288 for DeepMath
 max_prompt_length=${MAX_PROMPT_LENGTH:-1024}
-max_response_length=${MAX_RESPONSE_LENGTH:-8192}
-rollout_max_model_len=${ROLLOUT_MAX_MODEL_LEN:-12288}
+max_response_length=${MAX_RESPONSE_LENGTH:-4096}
+rollout_max_model_len=${ROLLOUT_MAX_MODEL_LEN:-6000}
 rollout_tp=${ROLLOUT_TP:-4}
 rollout_gpu_mem_util=${ROLLOUT_GPU_MEM_UTIL:-0.6}
 rollout_temperature=${ROLLOUT_TEMPERATURE:-0.6}
@@ -41,13 +41,13 @@ rollout_top_p=${ROLLOUT_TOP_P:-0.95}
 rollout_top_k=${ROLLOUT_TOP_K:-20}
 
 # Keep train_batch_size * rollout.n = 128 to match test_qwen8b.py max_num_seqs=128.
-train_prompt_bsz=${TRAIN_PROMPT_BSZ:-32}
+train_prompt_bsz=${TRAIN_PROMPT_BSZ:-64}
 n_resp_per_prompt=${N_RESP_PER_PROMPT:-4}
 rollout_max_num_seqs=${ROLLOUT_MAX_NUM_SEQS:-128}
 
 # Actor / PPO
-micro_batch_size=${MICRO_BATCH_SIZE:-2}
-mini_batch_size=${MINI_BATCH_SIZE:-32}
+micro_batch_size=${MICRO_BATCH_SIZE:-4}
+mini_batch_size=${MINI_BATCH_SIZE:-64}
 actor_lr=${ACTOR_LR:-1e-6}
 
 python3 -m verl.trainer.main_ppo \
@@ -57,7 +57,7 @@ python3 -m verl.trainer.main_ppo \
     data.prompt_key=prompt \
     data.reward_fn_key=data_source \
     data.return_raw_chat=True \
-    +data.apply_chat_template_kwargs.enable_thinking=True \
+    +data.apply_chat_template_kwargs.enable_thinking=False \
     data.max_prompt_length=${max_prompt_length} \
     data.max_response_length=${max_response_length} \
     data.filter_overlong_prompts=True \
