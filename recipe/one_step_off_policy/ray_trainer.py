@@ -424,103 +424,50 @@ class OneStepOffRayTrainer(RayPPOTrainer):
         wait_for_group_start_time = time.time()
         # 每次训练触发阈值（以 rollout 分组个数计），按顺序消费
         # train_group_plan = [4, 4, 4, 4] + [8] * 13 + [4, 4]
-        train_group_plan = [16] * 8
+        train_group_plan = [16] * 6 + [8] * 4
+        train_threshold = 8
         plan_idx = 0
+        while plan_idx < len(train_group_plan):
+            target_groups = train_group_plan[plan_idx]
+            required_groups = train_threshold if plan_idx == 0 else target_groups
+            target_items = required_groups * rollout_n
 
-        while True:
-            item = await asyncio.to_thread(stream_queue.get)
-            if item == stream_end_token:
-                break
+            while train_buffer_count < target_items:
+                item = await asyncio.to_thread(stream_queue.get)
+                if item == stream_end_token:
+                    continue
+                chunk: DataProto = item
+                uids = chunk.non_tensor_batch["uid"]
+                for idx in range(len(chunk)):
+                    uid = uids[idx]
+                    uid_list = uid_buffer.setdefault(uid, [])
+                    uid_list.append(chunk.select_idxs([idx]))
+                    if len(uid_list) == rollout_n:
+                        group_batch = DataProto.concat(uid_list)
+                        uid_buffer.pop(uid, None)
+                        train_buffer.append(group_batch)
+                        train_buffer_count += len(group_batch)
 
-            chunk: DataProto = item
-            uids = chunk.non_tensor_batch["uid"]
-            # print(f"len(chunk) :{len(chunk)}")
-            for idx in range(len(chunk)):
-                uid = uids[idx]
-                uid_list = uid_buffer.setdefault(uid, [])
-                uid_list.append(chunk.select_idxs([idx]))
-                if len(uid_list) == rollout_n:
-                    group_batch = DataProto.concat(uid_list)
-                    uid_buffer.pop(uid, None)
-                    # print(f"uid is {uid}, len(group_batch) is {len(group_batch)}")
-                    train_buffer.append(group_batch)
-                    train_buffer_count += len(group_batch)
-                    # target_groups = train_group_plan[min(plan_idx, len(train_group_plan) - 1)]
-                    target_groups = train_group_plan[plan_idx]
-                    if train_buffer_count >= target_groups * rollout_n:
-                    # if True:
-                        current_time = time.strftime("%Y-%m-%d %H:%M:%S")
-                        waited_s = time.time() - wait_for_group_start_time
-                        log_with_rank(
-                            (
-                                f"global_steps={self.global_steps} b_id={b_id_counter} "
-                                f"stream_group_ready waited_s={waited_s:.3f} "
-                                f"target_groups={target_groups} train_buffer_count={train_buffer_count} "
-                                f"current time {current_time}"
-                            ),
-                            rank=0,
-                            logger=default_logger,
-                            log_only_rank_0=True,
-                        )
-                        # 达到 temp_o 才统一计算 reward/logprob/advantage 并训练
-                        prep_start = time.time()
-                        prep_start_str = time.strftime("%Y-%m-%d %H:%M:%S")
-                        log_with_rank(
-                            f"global_steps={self.global_steps} b_id={b_id_counter} prepare_batch_start={prep_start_str}",
-                            rank=0,
-                            logger=default_logger,
-                            log_only_rank_0=True,
-                        )
-                        train_batch_raw = DataProto.concat(train_buffer)
-                        prepared, prep_metrics = self._prepare_batch_for_training(train_batch_raw)
-                        prep_end = time.time()
-                        prep_end_str = time.strftime("%Y-%m-%d %H:%M:%S")
-                        log_with_rank(
-                            (
-                                f"global_steps={self.global_steps} b_id={b_id_counter} "
-                                f"prepare_batch_end={prep_end_str} prep_s={prep_end - prep_start:.3f}"
-                            ),
-                            rank=0,
-                            logger=default_logger,
-                            log_only_rank_0=True,
-                        )
-                        # 复制一份用于指标，避免后续写入 meta_info 引发冲突
-                        processed_batches.append(prepared.select(deepcopy=True))
-                        for key, value in prep_metrics.items():
-                            metrics_across_chunks.setdefault(key, []).append(value)
-
-                        prepared.meta_info["global_token_num"] = torch.sum(
-                            prepared.batch["attention_mask"], dim=-1
-                        ).tolist()
-                        prepared.meta_info["multi_turn"] = self.config.actor_rollout_ref.rollout.multi_turn.enable
-                        prepared.meta_info["temperature"] = self.config.actor_rollout_ref.rollout.temperature
-                        prepared.meta_info["stream_zero_grad"] = zero_grad
-                        prepared.meta_info["stream_step_optimizer"] = False
-                        # 记录当前训练 batch 的编号与步数
-                        prepared.meta_info["stream_batch_id"] = b_id_counter
-                        prepared.meta_info["stream_global_steps"] = self.global_steps
-                        b_id_counter += 1
-                        actor_output = self.actor_rollout_wg.update_actor_stream(prepared)
-                        reduced = reduce_metrics(actor_output.meta_info["metrics"])
-                        for key, value in reduced.items():
-                            metrics_across_chunks.setdefault(key, []).append(value)
-                        zero_grad = False
-                        train_buffer = []
-                        train_buffer_count = 0
-                        wait_for_group_start_time = time.time()
-                        print(f"target_groups: {target_groups}")
-                        plan_idx += 1
-
-        if train_buffer:
             current_time = time.strftime("%Y-%m-%d %H:%M:%S")
+            waited_s = time.time() - wait_for_group_start_time
             log_with_rank(
-                f"train_buffer has triggerd! current time {current_time}",
+                (
+                    f"global_steps={self.global_steps} b_id={b_id_counter} "
+                    f"stream_group_ready waited_s={waited_s:.3f} "
+                    f"target_groups={target_groups} required_groups={required_groups} "
+                    f"train_buffer_count={train_buffer_count} "
+                    f"current time {current_time}"
+                ),
                 rank=0,
                 logger=default_logger,
                 log_only_rank_0=True,
             )
-                
-            # step 结束时把剩余 buffer 统一计算并执行 optimizer.step()
+            groups_to_train = train_buffer[:target_groups]
+            train_buffer = train_buffer[target_groups:]
+            train_batch_raw = DataProto.concat(groups_to_train)
+            train_buffer_count -= len(train_batch_raw)
+            is_final_chunk = plan_idx == len(train_group_plan) - 1
+
             prep_start = time.time()
             prep_start_str = time.strftime("%Y-%m-%d %H:%M:%S")
             log_with_rank(
@@ -529,7 +476,6 @@ class OneStepOffRayTrainer(RayPPOTrainer):
                 logger=default_logger,
                 log_only_rank_0=True,
             )
-            train_batch_raw = DataProto.concat(train_buffer)
             prepared, prep_metrics = self._prepare_batch_for_training(train_batch_raw)
             prep_end = time.time()
             prep_end_str = time.strftime("%Y-%m-%d %H:%M:%S")
@@ -542,7 +488,6 @@ class OneStepOffRayTrainer(RayPPOTrainer):
                 logger=default_logger,
                 log_only_rank_0=True,
             )
-            # 复制一份用于指标，避免后续写入 meta_info 引发冲突
             processed_batches.append(prepared.select(deepcopy=True))
             for key, value in prep_metrics.items():
                 metrics_across_chunks.setdefault(key, []).append(value)
@@ -553,8 +498,7 @@ class OneStepOffRayTrainer(RayPPOTrainer):
             prepared.meta_info["multi_turn"] = self.config.actor_rollout_ref.rollout.multi_turn.enable
             prepared.meta_info["temperature"] = self.config.actor_rollout_ref.rollout.temperature
             prepared.meta_info["stream_zero_grad"] = zero_grad
-            prepared.meta_info["stream_step_optimizer"] = True
-            # 记录当前训练 batch 的编号与步数
+            prepared.meta_info["stream_step_optimizer"] = is_final_chunk
             prepared.meta_info["stream_batch_id"] = b_id_counter
             prepared.meta_info["stream_global_steps"] = self.global_steps
             b_id_counter += 1
@@ -562,6 +506,18 @@ class OneStepOffRayTrainer(RayPPOTrainer):
             reduced = reduce_metrics(actor_output.meta_info["metrics"])
             for key, value in reduced.items():
                 metrics_across_chunks.setdefault(key, []).append(value)
+            zero_grad = False
+            wait_for_group_start_time = time.time()
+            print(f"target_groups: {target_groups}")
+            plan_idx += 1
+
+        if uid_buffer:
+            log_with_rank(
+                f"stream plan completed with incomplete uid groups, dropped_groups={len(uid_buffer)}",
+                rank=0,
+                logger=default_logger,
+                log_only_rank_0=True,
+            )
 
         if processed_batches:
             batch_for_metrics = DataProto.concat(processed_batches)
@@ -573,6 +529,125 @@ class OneStepOffRayTrainer(RayPPOTrainer):
 
         return reduce_metrics(metrics_across_chunks), batch_for_metrics
 
+    
+    async def _consume_stream_and_train_old(self, stream_queue: RayQueue, stream_end_token) -> tuple[dict, DataProto | None]:
+        # 按 uid 分组缓存，凑齐 rollout.n 后计算 advantage，再按 temp_o 触发训练
+        # temp_o = self._get_stream_group_size()
+        rollout_n = self.config.actor_rollout_ref.rollout.n
+        uid_buffer: dict[str, list[DataProto]] = {}
+        train_buffer: list[DataProto] = []
+        processed_batches: list[DataProto] = []
+        metrics_across_chunks: dict[str, list] = {}
+        train_buffer_count = 0
+        zero_grad = True
+        b_id_counter = 0
+        wait_for_group_start_time = time.time()
+        # 每次训练触发阈值（以 rollout 分组个数计），按顺序消费
+        # train_group_plan = [4, 4, 4, 4] + [8] * 13 + [4, 4]
+        train_group_plan = [4]*8
+        plan_idx = 0
+        while plan_idx < len(train_group_plan):
+            target_groups = train_group_plan[plan_idx]
+            target_items = target_groups * rollout_n
+
+            while train_buffer_count < target_items:
+                item = await asyncio.to_thread(stream_queue.get)
+                if item == stream_end_token:
+                    continue
+                chunk: DataProto = item
+                uids = chunk.non_tensor_batch["uid"]
+                for idx in range(len(chunk)):
+                    uid = uids[idx]
+                    uid_list = uid_buffer.setdefault(uid, [])
+                    uid_list.append(chunk.select_idxs([idx]))
+                    if len(uid_list) == rollout_n:
+                        group_batch = DataProto.concat(uid_list)
+                        uid_buffer.pop(uid, None)
+                        train_buffer.append(group_batch)
+                        train_buffer_count += len(group_batch)
+
+            current_time = time.strftime("%Y-%m-%d %H:%M:%S")
+            waited_s = time.time() - wait_for_group_start_time
+            log_with_rank(
+                (
+                    f"global_steps={self.global_steps} b_id={b_id_counter} "
+                    f"stream_group_ready waited_s={waited_s:.3f} "
+                    f"target_groups={target_groups} train_buffer_count={train_buffer_count} "
+                    f"current time {current_time}"
+                ),
+                rank=0,
+                logger=default_logger,
+                log_only_rank_0=True,
+            )
+            groups_to_train = train_buffer[:target_groups]
+            train_buffer = train_buffer[target_groups:]
+            train_batch_raw = DataProto.concat(groups_to_train)
+            train_buffer_count -= len(train_batch_raw)
+            is_final_chunk = plan_idx == len(train_group_plan) - 1
+
+            prep_start = time.time()
+            prep_start_str = time.strftime("%Y-%m-%d %H:%M:%S")
+            log_with_rank(
+                f"global_steps={self.global_steps} b_id={b_id_counter} prepare_batch_start={prep_start_str}",
+                rank=0,
+                logger=default_logger,
+                log_only_rank_0=True,
+            )
+            prepared, prep_metrics = self._prepare_batch_for_training(train_batch_raw)
+            prep_end = time.time()
+            prep_end_str = time.strftime("%Y-%m-%d %H:%M:%S")
+            log_with_rank(
+                (
+                    f"global_steps={self.global_steps} b_id={b_id_counter} "
+                    f"prepare_batch_end={prep_end_str} prep_s={prep_end - prep_start:.3f}"
+                ),
+                rank=0,
+                logger=default_logger,
+                log_only_rank_0=True,
+            )
+            processed_batches.append(prepared.select(deepcopy=True))
+            for key, value in prep_metrics.items():
+                metrics_across_chunks.setdefault(key, []).append(value)
+
+            prepared.meta_info["global_token_num"] = torch.sum(
+                prepared.batch["attention_mask"], dim=-1
+            ).tolist()
+            prepared.meta_info["multi_turn"] = self.config.actor_rollout_ref.rollout.multi_turn.enable
+            prepared.meta_info["temperature"] = self.config.actor_rollout_ref.rollout.temperature
+            prepared.meta_info["stream_zero_grad"] = zero_grad
+            prepared.meta_info["stream_step_optimizer"] = is_final_chunk
+            prepared.meta_info["stream_batch_id"] = b_id_counter
+            prepared.meta_info["stream_global_steps"] = self.global_steps
+            b_id_counter += 1
+            actor_output = self.actor_rollout_wg.update_actor_stream(prepared)
+            reduced = reduce_metrics(actor_output.meta_info["metrics"])
+            for key, value in reduced.items():
+                metrics_across_chunks.setdefault(key, []).append(value)
+            zero_grad = False
+            wait_for_group_start_time = time.time()
+            print(f"target_groups: {target_groups}")
+            plan_idx += 1
+
+        if uid_buffer:
+            log_with_rank(
+                f"stream plan completed with incomplete uid groups, dropped_groups={len(uid_buffer)}",
+                rank=0,
+                logger=default_logger,
+                log_only_rank_0=True,
+            )
+
+        if processed_batches:
+            batch_for_metrics = DataProto.concat(processed_batches)
+            batch_for_metrics.meta_info["global_token_num"] = torch.sum(
+                batch_for_metrics.batch["attention_mask"], dim=-1
+            ).tolist()
+        else:
+            batch_for_metrics = None
+
+        return reduce_metrics(metrics_across_chunks), batch_for_metrics
+
+    
+    
     async def _consume_stream_and_train_pipe(self, stream_queue: RayQueue, stream_end_token) -> tuple[dict, DataProto | None]:
         rollout_n = self.config.actor_rollout_ref.rollout.n
         uid_buffer: dict[str, list[DataProto]] = {}
@@ -587,7 +662,6 @@ class OneStepOffRayTrainer(RayPPOTrainer):
         # train_group_plan = [4, 4] + [8] * 14 + [4, 4]
         plan_idx = 0
         prepared_queue: asyncio.Queue = asyncio.Queue()
-
         async def _prepare_job(train_batch_raw: DataProto, batch_id: int):
             prep_start = time.time()
             prep_start_str = time.strftime("%Y-%m-%d %H:%M:%S")
@@ -639,60 +713,59 @@ class OneStepOffRayTrainer(RayPPOTrainer):
 
         update_worker_task = asyncio.create_task(_update_worker())
 
-        while True:
-            item = await asyncio.to_thread(stream_queue.get)
-            if item == stream_end_token:
-                break
+        while plan_idx < len(train_group_plan):
+            target_groups = train_group_plan[plan_idx]
+            target_items = target_groups * rollout_n
 
-            chunk: DataProto = item
-            uids = chunk.non_tensor_batch["uid"]
-            for idx in range(len(chunk)):
-                uid = uids[idx]
-                uid_list = uid_buffer.setdefault(uid, [])
-                uid_list.append(chunk.select_idxs([idx]))
-                if len(uid_list) == rollout_n:
-                    group_batch = DataProto.concat(uid_list)
-                    uid_buffer.pop(uid, None)
-                    train_buffer.append(group_batch)
-                    train_buffer_count += len(group_batch)
-                    target_groups = train_group_plan[plan_idx]
-                    if train_buffer_count >= target_groups * rollout_n:
-                        current_time = time.strftime("%Y-%m-%d %H:%M:%S")
-                        waited_s = time.time() - wait_for_group_start_time
-                        log_with_rank(
-                            (
-                                f"global_steps={self.global_steps} b_id={b_id_counter} "
-                                f"stream_group_ready waited_s={waited_s:.3f} "
-                                f"target_groups={target_groups} train_buffer_count={train_buffer_count} "
-                                f"current time {current_time}"
-                            ),
-                            rank=0,
-                            logger=default_logger,
-                            log_only_rank_0=True,
-                        )
-                        train_batch_raw = DataProto.concat(train_buffer)
-                        prep_task = asyncio.create_task(_prepare_job(train_batch_raw, b_id_counter))
-                        await prepared_queue.put((b_id_counter, zero_grad, False, prep_task))
-                        zero_grad = False
-                        b_id_counter += 1
-                        train_buffer = []
-                        train_buffer_count = 0
-                        wait_for_group_start_time = time.time()
-                        print(f"target_groups: {target_groups}")
-                        plan_idx += 1
+            while train_buffer_count < target_items:
+                item = await asyncio.to_thread(stream_queue.get)
+                if item == stream_end_token:
+                    continue
+                chunk: DataProto = item
+                uids = chunk.non_tensor_batch["uid"]
+                for idx in range(len(chunk)):
+                    uid = uids[idx]
+                    uid_list = uid_buffer.setdefault(uid, [])
+                    uid_list.append(chunk.select_idxs([idx]))
+                    if len(uid_list) == rollout_n:
+                        group_batch = DataProto.concat(uid_list)
+                        uid_buffer.pop(uid, None)
+                        train_buffer.append(group_batch)
+                        train_buffer_count += len(group_batch)
 
-        if train_buffer:
             current_time = time.strftime("%Y-%m-%d %H:%M:%S")
+            waited_s = time.time() - wait_for_group_start_time
             log_with_rank(
-                f"train_buffer has triggerd! current time {current_time}",
+                (
+                    f"global_steps={self.global_steps} b_id={b_id_counter} "
+                    f"stream_group_ready waited_s={waited_s:.3f} "
+                    f"target_groups={target_groups} train_buffer_count={train_buffer_count} "
+                    f"current time {current_time}"
+                ),
                 rank=0,
                 logger=default_logger,
                 log_only_rank_0=True,
             )
-            train_batch_raw = DataProto.concat(train_buffer)
+            groups_to_train = train_buffer[:target_groups]
+            train_buffer = train_buffer[target_groups:]
+            train_batch_raw = DataProto.concat(groups_to_train)
+            train_buffer_count -= len(train_batch_raw)
+            is_final_chunk = plan_idx == len(train_group_plan) - 1
             prep_task = asyncio.create_task(_prepare_job(train_batch_raw, b_id_counter))
-            await prepared_queue.put((b_id_counter, zero_grad, True, prep_task))
+            await prepared_queue.put((b_id_counter, zero_grad, is_final_chunk, prep_task))
+            zero_grad = False
             b_id_counter += 1
+            wait_for_group_start_time = time.time()
+            print(f"target_groups: {target_groups}")
+            plan_idx += 1
+
+        if uid_buffer:
+            log_with_rank(
+                f"stream plan completed with incomplete uid groups, dropped_groups={len(uid_buffer)}",
+                rank=0,
+                logger=default_logger,
+                log_only_rank_0=True,
+            )
 
         await prepared_queue.put(None)
         await update_worker_task
@@ -919,7 +992,8 @@ class OneStepOffRayTrainer(RayPPOTrainer):
             batch_future = asyncio.create_task(
                 self._async_gen_next_batch_stream(continuous_iterator, stream_queue, stream_end_token)
             )
-            if stream_train_pipe:
+            # if stream_train_pipe:
+            if False:
                 train_future_local = asyncio.create_task(
                     self._consume_stream_and_train_pipe(stream_queue, stream_end_token)
                 )

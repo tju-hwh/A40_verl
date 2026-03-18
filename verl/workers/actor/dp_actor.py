@@ -690,7 +690,7 @@ class DataParallelPPOActor(BasePPOActor):
                     micro_batch_metrics["actor/pg_loss"] = pg_loss.detach().item() * loss_scale_factor
                     append_to_dict(metrics, micro_batch_metrics)
 
-        if step_optimizer:
+        if False:
             # step 末尾才执行一次 optimizer.step()
             grad_norm = self._optimizer_step()
             metrics["actor/grad_norm"] = grad_norm.detach().item()

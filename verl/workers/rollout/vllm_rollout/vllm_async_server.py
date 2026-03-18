@@ -1070,6 +1070,9 @@ class vLLMHttpServerBase:
         return TokenOutput(token_ids=token_ids, log_probs=log_probs)
 
     async def wake_up(self):
+        if self._hop_enabled:
+            logger.info("skip wake_up in verl hop mode")
+            return
         if self.rollout_mode == RolloutMode.HYBRID:
             # Call all workers to switch between trainer mode and rollout mode.
             await asyncio.gather(*[worker.wake_up.remote() for worker in self.workers])
@@ -1082,7 +1085,7 @@ class vLLMHttpServerBase:
 
     async def sleep(self):
         if self._hop_enabled:
-            logger.info("skip sleep in hop rollout mode")
+            logger.info("skip sleep in verl hop mode")
             return
         if self.rollout_mode == RolloutMode.HYBRID:
             if self.node_rank == 0:
@@ -1097,7 +1100,7 @@ class vLLMHttpServerBase:
 
     async def clear_kv_cache(self):
         if self._hop_enabled:
-            logger.info("skip clear_kv_cache in hop rollout mode")
+            logger.info("skip clear_kv_cache in verl hop mode")
             return
         if self.node_rank == 0:
             await self.engine.reset_prefix_cache()

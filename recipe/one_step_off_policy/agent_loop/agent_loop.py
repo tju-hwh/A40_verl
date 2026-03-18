@@ -19,6 +19,7 @@ import ray
 
 from verl.experimental.agent_loop.agent_loop import AgentLoopManager
 from verl.protocol import DataProto
+from verl.utils.logger import default_logger, log_with_rank
 
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
@@ -81,9 +82,6 @@ class OneStepOffAgentLoopManager(AgentLoopManager):
         metrics = [output.meta_info.pop("metrics") for output in outputs]
         timing = self._performance_metrics(metrics, output)
         output.meta_info = {"timing": timing, **outputs[0].meta_info}
-        if stream_queue is not None and stream_end_token is not None:
-            # 只发送一个结束符，避免多 worker 重复
-            await asyncio.to_thread(stream_queue.put, stream_end_token)
         return output
 
     async def wake_up(self):
