@@ -16,10 +16,14 @@ import asyncio
 import json
 import logging
 import os
+import subprocess
+import sys
+import time
 from pprint import pprint
 from typing import Any, Callable, Optional
 
 import cloudpickle as pickle
+import httpx
 import numpy as np
 import ray
 import vllm.entrypoints.cli.serve
@@ -182,6 +186,11 @@ class vLLMHttpServerBase:
         else:
             self._master_address = None
             self._master_port = None
+        self._hop_cfg: dict[str, Any] = {}
+        self._hop_enabled: bool = False
+        self._hop_router_url: str = ""
+        self._hop_http_client: Optional[httpx.AsyncClient] = None
+        self._hop_processes: list[subprocess.Popen] = []
 
     def get_master_address(self):
         """Get master address and port for data parallel."""
@@ -201,10 +210,16 @@ class vLLMHttpServerBase:
         # 1. setup vllm serve cli args
         engine_kwargs = self.config.get("engine_kwargs", {}).get("vllm", {}) or {}
         engine_kwargs = {key: val for key, val in engine_kwargs.items() if val is not None}
+        hop_cfg = dict(engine_kwargs.pop("verl_hop", {}) or {})
+        self._hop_cfg = hop_cfg
+        self._hop_enabled = bool(hop_cfg.get("enabled", False))
         if self.config.get("limit_images", None):  # support for multi-image data
             engine_kwargs["limit_mm_per_prompt"] = {"image": self.config.get("limit_images")}
         if self.config.cudagraph_capture_sizes:
             engine_kwargs["cuda_graph_sizes"] = self.config.cudagraph_capture_sizes
+        if self._hop_enabled:
+            await self._launch_hop_cluster()
+            return
 
         # Override default generation config from hugging face model config,
         # user can still override them by passing kwargs in each request.
@@ -338,6 +353,388 @@ class vLLMHttpServerBase:
         else:
             await self.run_headless(server_args)
 
+    async def _launch_hop_cluster(self) -> None:
+        if self.node_rank != 0:
+            return
+
+        host = str(self._hop_cfg.get("host", "127.0.0.1"))
+        router_port = int(self._hop_cfg.get("router_port", 8200))
+        owner_state_port = int(self._hop_cfg.get("owner_state_port", 8300))
+        server_ports = self._hop_cfg.get("server_ports", [8101, 8102])
+        kv_ports = self._hop_cfg.get("server_kv_ports", [18101, 18102])
+        decode_cutovers = self._hop_cfg.get("decode_cutovers", [1024])
+        request_timeout_s = float(self._hop_cfg.get("request_timeout_s", 600.0))
+        connect_timeout_s = float(self._hop_cfg.get("connect_timeout_s", 60.0))
+        max_response_length = int(self._hop_cfg.get("max_response_length", self.config.response_length))
+        hop_http_max_connections = int(self._hop_cfg.get("http_max_connections", 1024))
+        hop_http_max_keepalive = int(self._hop_cfg.get("http_max_keepalive_connections", 512))
+
+        if len(server_ports) != len(kv_ports):
+            raise RuntimeError("verl_hop.server_ports and verl_hop.server_kv_ports must have the same size")
+        if len(server_ports) not in (2, 4):
+            raise RuntimeError("verl_hop currently supports exactly 2 or 4 servers")
+
+        py = sys.executable
+        env = dict(os.environ)
+        py_path = env.get("PYTHONPATH", "")
+        env["PYTHONPATH"] = f"/root/vllm:{py_path}" if py_path else "/root/vllm"
+
+        def _cleanup_stale_hop_processes() -> None:
+            patterns = [
+                "launch_four_server_ipc_vllm",
+                "launch_sequential_decode_router",
+                "kv_owner_state_server:create_app",
+                "vllm.entrypoints.openai.api_server",
+                "vllm.v1.engine.core",
+            ]
+            for pattern in patterns:
+                try:
+                    subprocess.run(
+                        ["pkill", "-9", "-f", pattern],
+                        check=False,
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                    )
+                except Exception:
+                    logger.exception("failed to cleanup stale hop process pattern=%s", pattern)
+            time.sleep(1.0)
+
+        def _j(obj: Any) -> str:
+            return json.dumps(obj) if isinstance(obj, (dict, list)) else str(obj)
+
+        log_prefix = f"/tmp/verl_hop_replica_{self.replica_rank}_{self.node_rank}"
+        owner_log_path = f"{log_prefix}_owner_state.log"
+        launch_log_path = f"{log_prefix}_launch4.log"
+        router_log_path = f"{log_prefix}_router.log"
+        owner_gpu_mem = float(self._hop_cfg.get("owner_gpu_memory_utilization", self.config.gpu_memory_utilization))
+        consumer_gpu_mem = float(
+            self._hop_cfg.get("consumer_gpu_memory_utilization", self.config.gpu_memory_utilization)
+        )
+        owner_max_num_seqs = int(self._hop_cfg.get("owner_max_num_seqs", self.config.max_num_seqs))
+        consumer_max_num_seqs = int(self._hop_cfg.get("consumer_max_num_seqs", self.config.max_num_seqs))
+        owner_tp = int(self._hop_cfg.get("owner_tensor_parallel_size", self.config.tensor_model_parallel_size))
+        consumer_tp = int(self._hop_cfg.get("consumer_tensor_parallel_size", owner_tp))
+        owner_cvd = str(self._hop_cfg.get("owner_cuda_visible_devices", "0,1"))
+        consumer_cvd = str(self._hop_cfg.get("consumer_cuda_visible_devices_all", owner_cvd))
+        owner_comp_cfg = self._hop_cfg.get("owner_compilation_config")
+        server2_comp_cfg = self._hop_cfg.get("server2_compilation_config")
+        server3_comp_cfg = self._hop_cfg.get("server3_compilation_config")
+        server4_comp_cfg = self._hop_cfg.get("server4_compilation_config")
+        send_activation_margin_tokens = int(self._hop_cfg.get("send_activation_margin_tokens", 512))
+        send_publish_token_stride = int(self._hop_cfg.get("send_publish_token_stride", 64))
+        owner_flush_each_layer = bool(self._hop_cfg.get("owner_flush_each_layer", False))
+        num_servers = len(server_ports)
+
+        if self._hop_cfg.get("enable_cuda_mps", False):
+            default_mps = [100, 60] if len(server_ports) == 2 else [100, 60, 40, 20]
+            percentages = self._hop_cfg.get("mps_active_thread_percentages", default_mps)
+            if len(percentages) >= 1:
+                env["CUDA_MPS_ACTIVE_THREAD_PERCENTAGE"] = str(percentages[0])
+
+        owner_cmd = [
+            py,
+            "-m",
+            "uvicorn",
+            "vllm.proxy_cluster.kv_owner_state_server:create_app",
+            "--factory",
+            "--host",
+            host,
+            "--port",
+            str(owner_state_port),
+        ]
+
+        async def _wait_http_ready(url: str, timeout_s: float) -> bool:
+            deadline = time.time() + max(0.1, timeout_s)
+            timeout = httpx.Timeout(min(5.0, max(1.0, timeout_s)), connect=min(2.0, max(0.5, timeout_s)))
+            async with httpx.AsyncClient(timeout=timeout) as client:
+                while time.time() < deadline:
+                    try:
+                        resp = await client.get(url)
+                        if 200 <= resp.status_code < 300:
+                            return True
+                    except Exception:
+                        pass
+                    await asyncio.sleep(0.25)
+            return False
+
+        def _tail_log(path: str, lines: int = 80) -> str:
+            if not os.path.exists(path):
+                return f"<missing log {path}>"
+            try:
+                with open(path, "r", encoding="utf-8", errors="replace") as f:
+                    data = f.readlines()
+                return "".join(data[-lines:])
+            except Exception as e:
+                return f"<failed to read {path}: {e}>"
+
+        _cleanup_stale_hop_processes()
+
+        self._hop_processes.append(
+            subprocess.Popen(
+                owner_cmd,
+                env=env,
+                start_new_session=True,
+                stdout=open(owner_log_path, "w"),
+                stderr=subprocess.STDOUT,
+            )
+        )
+
+        owner_ready = await _wait_http_ready(f"http://{host}:{owner_state_port}/healthz", 60.0)
+        if not owner_ready:
+            raise RuntimeError(
+                "verl hop owner-state failed to become ready\n" f"owner_state_tail:\n{_tail_log(owner_log_path)}"
+            )
+
+        launch_cmd = [
+            py,
+            "-m",
+            "vllm.proxy_cluster.launch_four_server_ipc_vllm",
+            "--num-servers",
+            str(num_servers),
+            "--model",
+            self.model_config.local_path,
+            "--host",
+            host,
+            "--server1-port",
+            str(server_ports[0]),
+            "--server2-port",
+            str(server_ports[1]),
+            "--owner-gpu-memory-utilization",
+            str(owner_gpu_mem),
+            "--consumer-gpu-memory-utilization",
+            str(consumer_gpu_mem),
+            "--owner-max-num-seqs",
+            str(owner_max_num_seqs),
+            "--consumer-max-num-seqs",
+            str(consumer_max_num_seqs),
+            "--owner-max-model-len",
+            str(self.config.max_model_len),
+            "--consumer-max-model-len",
+            str(self.config.max_model_len),
+            "--owner-cuda-visible-devices",
+            owner_cvd,
+            "--consumer-cuda-visible-devices-all",
+            consumer_cvd,
+            "--owner-tensor-parallel-size",
+            str(owner_tp),
+            "--consumer-tensor-parallel-size",
+            str(consumer_tp),
+            "--consumer-attention-backend",
+            str(self._hop_cfg.get("consumer_attention_backend", "TORCH_SDPA")),
+            "--kv-owner-state-url",
+            f"http://{host}:{owner_state_port}",
+            "--kv-transfer-config-template",
+            '{"kv_connector":"CudaIpcConnector","kv_role":"kv_both","kv_rank":0,"kv_parallel_size":1}',
+            "--shared-kv-pool-enable",
+            "--shared-kv-pool-meta-path",
+            str(self._hop_cfg.get("shared_kv_pool_meta_path", "/tmp/vllm_shared_kv_pool_from_verl.pkl")),
+            "--send-activation-margin-tokens",
+            str(send_activation_margin_tokens),
+            "--send-publish-token-stride",
+            str(send_publish_token_stride),
+        ]
+        if owner_flush_each_layer:
+            launch_cmd.append("--owner-flush-each-layer")
+        if num_servers >= 3:
+            launch_cmd += ["--server3-port", str(server_ports[2])]
+        if num_servers >= 4:
+            launch_cmd += ["--server4-port", str(server_ports[3])]
+        if self._hop_cfg.get("no_consumer_enforce_eager", True):
+            launch_cmd.append("--no-consumer-enforce-eager")
+        if owner_comp_cfg:
+            launch_cmd += ["--owner-compilation-config", _j(owner_comp_cfg)]
+        if server2_comp_cfg:
+            launch_cmd += ["--server2-compilation-config", _j(server2_comp_cfg)]
+        if num_servers >= 3 and server3_comp_cfg:
+            launch_cmd += ["--server3-compilation-config", _j(server3_comp_cfg)]
+        if num_servers >= 4 and server4_comp_cfg:
+            launch_cmd += ["--server4-compilation-config", _j(server4_comp_cfg)]
+        if self._hop_cfg.get("enable_cuda_mps", False):
+            default_mps = [100, 60] if num_servers == 2 else [100, 60, 40, 20]
+            launch_cmd += [
+                "--enable-cuda-mps",
+                "--mps-active-thread-percentages",
+                ",".join(str(x) for x in self._hop_cfg.get("mps_active_thread_percentages", default_mps)),
+            ]
+
+        self._hop_processes.append(
+            subprocess.Popen(
+                launch_cmd,
+                env=env,
+                start_new_session=True,
+                stdout=open(launch_log_path, "w"),
+                stderr=subprocess.STDOUT,
+            )
+        )
+
+        startup_timeout_s = float(self._hop_cfg.get("startup_timeout_s", max(300.0, connect_timeout_s)))
+        upstream_timeout_s = max(startup_timeout_s, connect_timeout_s)
+        for port in server_ports:
+            ready = await _wait_http_ready(f"http://{host}:{port}/v1/models", upstream_timeout_s)
+            if not ready:
+                raise RuntimeError(
+                    f"verl hop upstream server at {host}:{port} failed to become ready\n"
+                    f"owner_state_tail:\n{_tail_log(owner_log_path)}\n"
+                    f"launch4_tail:\n{_tail_log(launch_log_path)}"
+                )
+
+        router_cmd = [
+            py,
+            "-m",
+            "vllm.proxy_cluster.launch_sequential_decode_router",
+            "--num-servers",
+            str(num_servers),
+            "--host",
+            host,
+            "--port",
+            str(router_port),
+            "--server1-url",
+            f"http://{host}:{server_ports[0]}",
+            "--server2-url",
+            f"http://{host}:{server_ports[1]}",
+            "--server-kv-ports",
+            ",".join(str(x) for x in kv_ports),
+            "--routing-mode",
+            "sequential_handoff",
+            "--decode-cutovers",
+            ",".join(str(x) for x in decode_cutovers),
+            "--upstream-max-model-len",
+            str(self.config.max_model_len),
+            "--max-response-length",
+            str(max_response_length),
+            "--request-timeout-s",
+            str(request_timeout_s),
+            "--connect-timeout-s",
+            str(connect_timeout_s),
+            "--kv-owner-state-url",
+            f"http://{host}:{owner_state_port}",
+        ]
+        if num_servers >= 3:
+            router_cmd += ["--server3-url", f"http://{host}:{server_ports[2]}"]
+        if num_servers >= 4:
+            router_cmd += ["--server4-url", f"http://{host}:{server_ports[3]}"]
+        router_proc = subprocess.Popen(
+            router_cmd,
+            env=env,
+            start_new_session=True,
+            stdout=open(router_log_path, "w"),
+            stderr=subprocess.STDOUT,
+        )
+        self._hop_processes.append(router_proc)
+
+        self._hop_router_url = str(self._hop_cfg.get("router_url", f"http://{host}:{router_port}")).rstrip("/")
+        self._hop_http_client = httpx.AsyncClient(
+            timeout=httpx.Timeout(request_timeout_s, connect=connect_timeout_s, pool=request_timeout_s),
+            limits=httpx.Limits(
+                max_connections=max(32, hop_http_max_connections),
+                max_keepalive_connections=max(16, hop_http_max_keepalive),
+            ),
+        )
+        await self._wait_hop_router_ready()
+        self._server_address = host
+        self._server_port = router_port
+        router_ready = await _wait_http_ready(self._hop_router_url + "/healthz", 60.0)
+        if not router_ready:
+            raise RuntimeError(
+                "verl hop router failed to become ready\n"
+                f"launch4_tail:\n{_tail_log(launch_log_path)}\n"
+                f"router_tail:\n{_tail_log(router_log_path)}"
+            )
+        if router_proc.poll() is not None:
+            raise RuntimeError(
+                "verl hop router exited unexpectedly after startup\n"
+                f"returncode={router_proc.returncode}\n"
+                f"launch4_tail:\n{_tail_log(launch_log_path)}\n"
+                f"router_tail:\n{_tail_log(router_log_path)}"
+            )
+
+        logger.info("verl hop router ready at %s", self._hop_router_url)
+
+    async def _wait_hop_router_ready(self, timeout_s: float = 300.0) -> None:
+        assert self._hop_http_client is not None
+        deadline = time.time() + timeout_s
+        url = self._hop_router_url + "/healthz"
+        last_err = ""
+        while time.time() < deadline:
+            try:
+                resp = await self._hop_http_client.get(url)
+                if 200 <= resp.status_code < 300:
+                    return
+                last_err = f"status={resp.status_code}"
+            except Exception as exc:
+                last_err = str(exc)
+            await asyncio.sleep(1.0)
+        raise RuntimeError(f"hop router not ready within {timeout_s}s ({last_err})")
+
+    async def _generate_via_hop_router(
+        self,
+        prompt_ids: list[int],
+        sampling_params: dict[str, Any],
+        request_id: str,
+    ) -> TokenOutput:
+        if self._hop_http_client is None:
+            raise RuntimeError("hop router client is not initialized")
+        if self._hop_cfg.get("router_mode", "sequential_handoff") != "sequential_handoff":
+            raise NotImplementedError("Only sequential_handoff router_mode is supported in verl hop rollout")
+
+        req_max_tokens = sampling_params.get("max_tokens")
+        if req_max_tokens is None:
+            req_max_tokens = self.config.response_length
+        req_max_tokens = int(req_max_tokens)
+        max_tokens = min(
+            req_max_tokens,
+            int(self._hop_cfg.get("max_response_length", self.config.response_length)),
+            self.config.max_model_len - len(prompt_ids),
+        )
+        payload = {
+            "model": self.model_config.local_path,
+            "request_id": request_id,
+            "prompt": prompt_ids,
+            "max_tokens": max(1, int(max_tokens)),
+            "temperature": sampling_params.get("temperature", self.config.temperature),
+            "top_p": sampling_params.get("top_p", self.config.top_p),
+            "top_k": sampling_params.get("top_k", self.config.top_k),
+            "stop": sampling_params.get("stop", []),
+            "return_token_ids": True,
+        }
+        if sampling_params.get("logprobs", False):
+            payload["logprobs"] = 1
+        if "repetition_penalty" in sampling_params:
+            payload["repetition_penalty"] = sampling_params["repetition_penalty"]
+        if sampling_params.get("ignore_eos", False):
+            payload["ignore_eos"] = True
+        if sampling_params.get("presence_penalty") is not None:
+            payload["presence_penalty"] = sampling_params["presence_penalty"]
+        if sampling_params.get("frequency_penalty") is not None:
+            payload["frequency_penalty"] = sampling_params["frequency_penalty"]
+
+        resp = await self._hop_http_client.post(self._hop_router_url + "/v1/completions", json=payload)
+        if resp.status_code >= 400:
+            raise RuntimeError(f"hop router error status={resp.status_code} body={resp.text}")
+        obj = resp.json()
+        choices = obj.get("choices")
+        if not isinstance(choices, list) or not choices or not isinstance(choices[0], dict):
+            raise RuntimeError("hop router response missing choices[0]")
+        token_ids = choices[0].get("token_ids")
+        if not isinstance(token_ids, list) or not all(isinstance(x, int) for x in token_ids):
+            raise RuntimeError("hop router response missing choices[0].token_ids")
+        log_probs = None
+        choice_logprobs = choices[0].get("logprobs")
+        if isinstance(choice_logprobs, dict):
+            token_logprobs = choice_logprobs.get("token_logprobs")
+            if isinstance(token_logprobs, list):
+                parsed: list[float] = []
+                ok = True
+                for x in token_logprobs[: len(token_ids)]:
+                    if isinstance(x, (int, float)):
+                        parsed.append(float(x))
+                    else:
+                        ok = False
+                        break
+                if ok and len(parsed) == len(token_ids):
+                    log_probs = parsed
+        return TokenOutput(token_ids=token_ids, log_probs=log_probs)
+
     async def run_server(self, args: argparse.Namespace):
         engine_args = AsyncEngineArgs.from_cli_args(args)
         usage_context = UsageContext.OPENAI_API_SERVER
@@ -396,6 +793,10 @@ class vLLMHttpServerBase:
         image_data: Optional[list[Any]] = None,
     ) -> TokenOutput:
         """Generate sequence with token-in-token-out."""
+        if self._hop_enabled:
+            if image_data:
+                raise NotImplementedError("verl hop rollout does not support image_data yet")
+            return await self._generate_via_hop_router(prompt_ids, sampling_params, request_id)
         # TODO(@wuxibin): switch to `/generate` http endpoint once multi-modal support ready.
         max_tokens = self.config.max_model_len - len(prompt_ids)
         sampling_params["logprobs"] = 0 if sampling_params.pop("logprobs", False) else None
@@ -433,6 +834,9 @@ class vLLMHttpServerBase:
         return TokenOutput(token_ids=token_ids, log_probs=log_probs)
 
     async def wake_up(self):
+        if self._hop_enabled:
+            logger.info("skip wake_up in verl hop mode")
+            return
         if self.rollout_mode == RolloutMode.HYBRID:
             # Call all workers to switch between trainer mode and rollout mode.
             await asyncio.gather(*[worker.wake_up.remote() for worker in self.workers])
@@ -444,6 +848,9 @@ class vLLMHttpServerBase:
             logger.info("skip wake_up in standalone mode")
 
     async def sleep(self):
+        if self._hop_enabled:
+            logger.info("skip sleep in verl hop mode")
+            return
         if self.rollout_mode == RolloutMode.HYBRID:
             if self.node_rank == 0:
                 await self.engine.reset_prefix_cache()
@@ -456,10 +863,46 @@ class vLLMHttpServerBase:
             logger.info("skip sleep in standalone mode")
 
     async def clear_kv_cache(self):
+        if self._hop_enabled:
+            host = str(self._hop_cfg.get("host", "127.0.0.1"))
+            server_ports = list(self._hop_cfg.get("server_ports", [8101, 8102]))
+            owner_state_port = int(self._hop_cfg.get("owner_state_port", 8300))
+            handoff_pin_s = float(self._hop_cfg.get("handoff_pin_s", 1.5))
+            # Let deferred producer-side frees mature before resetting cache state.
+            await asyncio.sleep(max(0.0, handoff_pin_s) + 0.2)
+            timeout = httpx.Timeout(30.0, connect=5.0)
+            async with httpx.AsyncClient(timeout=timeout) as client:
+                for port in server_ports:
+                    try:
+                        resp = await client.post(f"http://{host}:{port}/reset_hop_state")
+                        resp.raise_for_status()
+                    except Exception as exc:
+                        logger.warning(
+                            "hop clear_kv_cache reset_hop_state failed upstream=%s:%s err=%r",
+                            host,
+                            port,
+                            exc,
+                        )
+                try:
+                    resp = await client.post(
+                        f"http://{host}:{owner_state_port}/reset_all",
+                        json={"confirm": True},
+                    )
+                    resp.raise_for_status()
+                except Exception as exc:
+                    logger.warning(
+                        "hop clear_kv_cache owner_state reset_all failed host=%s port=%s err=%r",
+                        host,
+                        owner_state_port,
+                        exc,
+                    )
+            return
         if self.node_rank == 0:
             await self.engine.reset_prefix_cache()
 
     async def wait_for_requests_to_drain(self):
+        if self._hop_enabled:
+            return
         await self.engine.wait_for_requests_to_drain()
 
 

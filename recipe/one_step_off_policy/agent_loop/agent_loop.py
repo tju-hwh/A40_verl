@@ -14,17 +14,38 @@
 import asyncio
 import logging
 import os
+import time
 
 import ray
 
 from verl.experimental.agent_loop.agent_loop import AgentLoopManager
 from verl.protocol import DataProto
+from verl.utils.logger import default_logger, log_with_rank
 
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 
 
 class OneStepOffAgentLoopManager(AgentLoopManager):
+    async def _clear_kv_cache_background(self, global_steps: int) -> None:
+        current_time = time.strftime("%Y-%m-%d %H:%M:%S")
+        log_with_rank(
+            f"global_steps={global_steps} clear_kv_cache_start current time {current_time}",
+            rank=0,
+            logger=default_logger,
+            log_only_rank_0=True,
+        )
+        try:
+            await self.clear_kv_cache()
+        finally:
+            current_time = time.strftime("%Y-%m-%d %H:%M:%S")
+            log_with_rank(
+                f"global_steps={global_steps} clear_kv_cache_end current time {current_time}",
+                rank=0,
+                logger=default_logger,
+                log_only_rank_0=True,
+            )
+
     async def generate_sequences_async(self, prompts: DataProto) -> DataProto:
         """Split input batch and dispatch to agent loop workers (async version).
 
@@ -84,6 +105,8 @@ class OneStepOffAgentLoopManager(AgentLoopManager):
         if stream_queue is not None and stream_end_token is not None:
             # 只发送一个结束符，避免多 worker 重复
             await asyncio.to_thread(stream_queue.put, stream_end_token)
+            global_steps = int(prompts.meta_info.get("global_steps", -1))
+            asyncio.create_task(self._clear_kv_cache_background(global_steps))
         return output
 
     async def wake_up(self):

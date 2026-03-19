@@ -18,6 +18,7 @@
 This trainer supports model-agonistic model initialization with huggingface
 """
 
+import ast
 import asyncio
 import uuid
 from pprint import pprint
@@ -62,6 +63,28 @@ from verl.utils.tracking import ValidationGenerationsLogger
 import os
 from verl.utils.logger import default_logger, log_with_rank
 import time
+
+
+def _load_train_group_plan(default_plan: list[int]) -> list[int]:
+    raw = os.getenv("TRAIN_GROUP_PLAN", "").strip()
+    if not raw:
+        return list(default_plan)
+    try:
+        value = ast.literal_eval(raw)
+    except Exception:
+        return list(default_plan)
+    if not isinstance(value, list) or not value:
+        return list(default_plan)
+    out: list[int] = []
+    for item in value:
+        try:
+            num = int(item)
+        except Exception:
+            return list(default_plan)
+        if num <= 0:
+            return list(default_plan)
+        out.append(num)
+    return out
 
 class OneStepOffRayTrainer(RayPPOTrainer):
     # TODO: support each role have individual ray_worker_group_cls,
@@ -457,7 +480,7 @@ class OneStepOffRayTrainer(RayPPOTrainer):
         zero_grad = True
         b_id_counter = 0
         # 每次训练触发阈值（以 rollout 分组个数计），按顺序消费
-        train_group_plan = [4, 4, 4, 4] + [8] * 13 + [4, 4]
+        train_group_plan = _load_train_group_plan([8] * 14 + [4] * 4)
         plan_idx = 0
 
         while True:
@@ -819,19 +842,6 @@ class OneStepOffRayTrainer(RayPPOTrainer):
                     metrics.update(_metrics)
                     batch.meta_info.pop("timing", None)
 
-                # sync weights from actor to rollout
-                with marked_timer("sync_rollout_weights", timing_raw, color="purple"):
-                    # self.sync_rollout_weights()
-                    await self.async_rollout_manager.clear_kv_cache()
-
-                # async next generation
-                if not is_last_step:
-                    if stream_train:
-                        batch_data_future, train_future = _start_stream_tasks()
-                    else:
-                        batch_data_future = asyncio.create_task(self._async_gen_next_batch(continuous_iterator))
-                    await asyncio.sleep(0)
-
                 if not stream_train:
                     with marked_timer("reward", timing_raw, color="yellow"):
                         # compute reward model score
@@ -1056,6 +1066,13 @@ class OneStepOffRayTrainer(RayPPOTrainer):
                 pprint(f"Final validation metrics: {last_val_metrics}")
                 progress_bar.close()
                 return
+
+            # async next generation
+            if stream_train:
+                batch_data_future, train_future = _start_stream_tasks()
+            else:
+                batch_data_future = asyncio.create_task(self._async_gen_next_batch(continuous_iterator))
+            await asyncio.sleep(0)
 
             # this is experimental and may be changed/removed in the future
             # in favor of a general-purpose data buffer pool
