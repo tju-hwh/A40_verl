@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+export TORCH_CUDA_ARCH_LIST=8.0
+export MAX_JOBS=4
+
 cd /root/A40_verl
 
 export mylog="${mylog:-1}"
@@ -81,7 +84,7 @@ python3 -m recipe.one_step_off_policy.main_ppo \
   data.val_files="${TEST_FILE}" \
   data.train_batch_size=128 \
   data.max_prompt_length=1024 \
-  data.max_response_length=8192 \
+  data.max_response_length=4096 \
   "+data.apply_chat_template_kwargs.enable_thinking=False" \
   data.filter_overlong_prompts=True \
   data.truncation='error' \
@@ -128,7 +131,11 @@ python3 -m recipe.one_step_off_policy.main_ppo \
   trainer.nnodes="${NNODES}" \
   trainer.stream_train=True \
   "+trainer.stream_train_pipe=False" \
-  ray_kwargs.ray_init.address="${RAY_ADDRESS}" \
+  "+ray_kwargs.ray_init.address=${RAY_ADDRESS}" \
+  "+ray_kwargs.ray_init.runtime_env.env_vars.TRAIN_GROUP_PLAN=${TRAIN_GROUP_PLAN}" \
+  "+ray_kwargs.ray_init.runtime_env.env_vars.NCCL_SOCKET_IFNAME=${NCCL_SOCKET_IFNAME}" \
+  "+ray_kwargs.ray_init.runtime_env.env_vars.GLOO_SOCKET_IFNAME=${GLOO_SOCKET_IFNAME}" \
+  "+ray_kwargs.ray_init.runtime_env.env_vars.CUDA_MPS_ACTIVE_THREAD_PERCENTAGE=${CUDA_MPS_ACTIVE_THREAD_PERCENTAGE}" \
   trainer.n_gpus_per_node="${n_gpus_training}" \
   rollout.nnodes="${NNODES}" \
   rollout.n_gpus_per_node="${n_gpus_rollout}" \

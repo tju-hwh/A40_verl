@@ -78,13 +78,13 @@ Assume:
 On node0:
 
 ```bash
-NODE_IP=${NODE0_IP} bash /root/A40_verl/scripts/hop_dp4tp4_2node/start_ray_head.sh
+NODE_IP=172.24.79.15 bash /root/A40_verl/scripts/hop_dp4tp4_2node/start_ray_head.sh
 ```
 
 On node1:
 
 ```bash
-NODE_IP=${NODE1_IP} HEAD_IP=${NODE0_IP} bash /root/A40_verl/scripts/hop_dp4tp4_2node/start_ray_worker.sh
+NODE_IP=172.24.79.13 HEAD_IP=172.24.79.15 bash /root/A40_verl/scripts/hop_dp4tp4_2node/start_ray_worker.sh
 ```
 
 ### 2. Start owner-state on node0
@@ -100,7 +100,8 @@ OWNER_STATE_PORT=8300 bash /root/A40_verl/scripts/hop_dp4tp4_2node/start_owner_s
 On node0:
 
 ```bash
-NODE_IP=${NODE0_IP} \
+export NODE0_IP=172.24.79.15
+NODE_IP=172.24.79.15 \
 OWNER_STATE_URL=http://${NODE0_IP}:8300 \
 LOCAL_CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 \
 bash /root/A40_verl/scripts/hop_dp4tp4_2node/start_local_cluster.sh
@@ -109,7 +110,8 @@ bash /root/A40_verl/scripts/hop_dp4tp4_2node/start_local_cluster.sh
 On node1:
 
 ```bash
-NODE_IP=${NODE1_IP} \
+export NODE0_IP=172.24.79.15
+NODE_IP=172.24.79.13 \
 OWNER_STATE_URL=http://${NODE0_IP}:8300 \
 LOCAL_CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 \
 bash /root/A40_verl/scripts/hop_dp4tp4_2node/start_local_cluster.sh
@@ -120,6 +122,8 @@ bash /root/A40_verl/scripts/hop_dp4tp4_2node/start_local_cluster.sh
 On node0:
 
 ```bash
+export NODE0_IP=172.24.79.15
+export NODE1_IP=172.24.79.13
 NODE0_IP=${NODE0_IP} \
 NODE1_IP=${NODE1_IP} \
 OWNER_STATE_URL=http://${NODE0_IP}:8300 \

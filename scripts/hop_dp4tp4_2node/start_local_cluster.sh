@@ -5,8 +5,9 @@ cd /root/vllm
 
 export NCCL_SOCKET_IFNAME="${NCCL_SOCKET_IFNAME:-eth0,eth1,eth2,eth3}"
 export GLOO_SOCKET_IFNAME="${GLOO_SOCKET_IFNAME:-eth0,eth1,eth2,eth3}"
+export VLLM_SERVER_DEV_MODE="${VLLM_SERVER_DEV_MODE:-1}"
 
-NODE_IP="${NODE_IP:?set NODE_IP to this machine's routable IP}"
+NODE_IP="${NODE_IP:?set NODE_IP to this machine routable IP}"
 MODEL_PATH="${MODEL_PATH:-/root/model/Qwen3-8B}"
 LOCAL_CUDA_VISIBLE_DEVICES="${LOCAL_CUDA_VISIBLE_DEVICES:-0,1,2,3,4,5,6,7}"
 LOCAL_DP_SIZE="${LOCAL_DP_SIZE:-2}"
@@ -25,8 +26,9 @@ MAX_MODEL_LEN="${MAX_MODEL_LEN:-12288}"
 SHARED_KV_POOL_META_PATH="${SHARED_KV_POOL_META_PATH:-/dev/shm/vllm_shared_kv_pool_dp4tp4}"
 SEND_ACTIVATION_MARGIN_TOKENS="${SEND_ACTIVATION_MARGIN_TOKENS:-0}"
 SEND_PUBLISH_TOKEN_STRIDE="${SEND_PUBLISH_TOKEN_STRIDE:-2048}"
-OWNER_COMPILATION_CONFIG="${OWNER_COMPILATION_CONFIG:-'{\"level\":3,\"use_inductor\":true,\"use_cudagraph\":true}'}"
-CONSUMER_COMPILATION_CONFIG="${CONSUMER_COMPILATION_CONFIG:-'{\"level\":3,\"use_inductor\":true,\"use_cudagraph\":true}'}"
+DEFAULT_COMPILATION_CONFIG='{"level":3,"use_inductor":true,"use_cudagraph":true}'
+OWNER_COMPILATION_CONFIG="${OWNER_COMPILATION_CONFIG:-${DEFAULT_COMPILATION_CONFIG}}"
+CONSUMER_COMPILATION_CONFIG="${CONSUMER_COMPILATION_CONFIG:-${DEFAULT_COMPILATION_CONFIG}}"
 CONSUMER_ATTENTION_BACKEND="${CONSUMER_ATTENTION_BACKEND:-FLASH_ATTN}"
 
 ENABLE_CUDA_MPS="${ENABLE_CUDA_MPS:-true}"
@@ -34,6 +36,7 @@ MPS_OWNER_PERCENTAGE="${MPS_OWNER_PERCENTAGE:-100}"
 MPS_CONSUMER_PERCENTAGE="${MPS_CONSUMER_PERCENTAGE:-60}"
 
 LOG_PATH="${LOG_PATH:-/tmp/hop_local_cluster_${NODE_IP//./_}.log}"
+PID_FILE="/tmp/hop_local_cluster_${NODE_IP//./_}.pid"
 
 export VLLM_HOST_IP="${NODE_IP}"
 
@@ -74,6 +77,6 @@ if [[ "${ENABLE_CUDA_MPS}" == "true" || "${ENABLE_CUDA_MPS}" == "1" ]]; then
 fi
 
 nohup "${CMD[@]}" >"${LOG_PATH}" 2>&1 &
-
-echo $! > "/tmp/hop_local_cluster_${NODE_IP//./_}.pid"
-echo "local hop cluster started pid=$(cat /tmp/hop_local_cluster_${NODE_IP//./_}.pid) log=${LOG_PATH}"
+echo $! > "${PID_FILE}"
+PID="$(cat "${PID_FILE}")"
+echo "local hop cluster started pid=${PID} log=${LOG_PATH}"
