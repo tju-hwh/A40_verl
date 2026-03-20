@@ -63,6 +63,23 @@ logger = logging.getLogger(__file__)
 logger.setLevel(logging.INFO)
 
 
+def _parse_hop_url_list(raw: Any) -> list[str]:
+    if raw is None:
+        return []
+    if isinstance(raw, str):
+        return [x.strip() for x in raw.split(",") if x.strip()]
+    if isinstance(raw, (list, tuple)):
+        out: list[str] = []
+        for item in raw:
+            if item is None:
+                continue
+            text = str(item).strip()
+            if text:
+                out.append(text)
+        return out
+    return []
+
+
 class ExternalZeroMQDistributedExecutor(Executor):
     """An executor that engines are launched by external ray actors."""
 
@@ -354,6 +371,32 @@ class vLLMHttpServerBase:
             await self.run_headless(server_args)
 
     async def _launch_hop_cluster(self) -> None:
+        if bool(self._hop_cfg.get("external_managed", False)):
+            router_url = str(self._hop_cfg.get("router_url", "")).rstrip("/")
+            if not router_url:
+                raise RuntimeError("verl_hop.external_managed requires verl_hop.router_url")
+            request_timeout_s = float(self._hop_cfg.get("request_timeout_s", 600.0))
+            connect_timeout_s = float(self._hop_cfg.get("connect_timeout_s", 60.0))
+            hop_http_max_connections = int(self._hop_cfg.get("http_max_connections", 1024))
+            hop_http_max_keepalive = int(self._hop_cfg.get("http_max_keepalive_connections", 512))
+            self._hop_router_url = router_url
+            self._hop_http_client = httpx.AsyncClient(
+                timeout=httpx.Timeout(request_timeout_s, connect=connect_timeout_s, pool=request_timeout_s),
+                limits=httpx.Limits(
+                    max_connections=max(32, hop_http_max_connections),
+                    max_keepalive_connections=max(16, hop_http_max_keepalive),
+                ),
+            )
+            await self._wait_hop_router_ready(float(self._hop_cfg.get("startup_timeout_s", 300.0)))
+            self._server_address = str(self._hop_cfg.get("router_host", self._server_address))
+            self._server_port = int(self._hop_cfg.get("router_port", 8200))
+            logger.info(
+                "verl hop using externally managed cluster router=%s owner_state=%s",
+                self._hop_router_url,
+                self._hop_cfg.get("owner_state_url", ""),
+            )
+            return
+
         if self.node_rank != 0:
             return
 
@@ -410,12 +453,29 @@ class vLLMHttpServerBase:
         consumer_gpu_mem = float(
             self._hop_cfg.get("consumer_gpu_memory_utilization", self.config.gpu_memory_utilization)
         )
+        num_servers = len(server_ports)
         owner_max_num_seqs = int(self._hop_cfg.get("owner_max_num_seqs", self.config.max_num_seqs))
         consumer_max_num_seqs = int(self._hop_cfg.get("consumer_max_num_seqs", self.config.max_num_seqs))
         owner_tp = int(self._hop_cfg.get("owner_tensor_parallel_size", self.config.tensor_model_parallel_size))
         consumer_tp = int(self._hop_cfg.get("consumer_tensor_parallel_size", owner_tp))
+        owner_dp = int(self._hop_cfg.get("owner_data_parallel_size", 1))
+        consumer_dp = int(self._hop_cfg.get("consumer_data_parallel_size", owner_dp))
         owner_cvd = str(self._hop_cfg.get("owner_cuda_visible_devices", "0,1"))
         consumer_cvd = str(self._hop_cfg.get("consumer_cuda_visible_devices_all", owner_cvd))
+        owner_visible_count = len([x for x in owner_cvd.split(",") if x.strip()])
+        consumer_visible_count = len([x for x in consumer_cvd.split(",") if x.strip()])
+        if num_servers == 2 and owner_dp != consumer_dp:
+            raise RuntimeError(
+                f"2-server hop requires mirrored DP sizes, got owner_dp={owner_dp}, consumer_dp={consumer_dp}"
+            )
+        if owner_tp * owner_dp > owner_visible_count:
+            raise RuntimeError(
+                f"owner tp*dp exceeds visible devices: tp={owner_tp}, dp={owner_dp}, cvd={owner_cvd}"
+            )
+        if consumer_tp * consumer_dp > consumer_visible_count:
+            raise RuntimeError(
+                f"consumer tp*dp exceeds visible devices: tp={consumer_tp}, dp={consumer_dp}, cvd={consumer_cvd}"
+            )
         owner_comp_cfg = self._hop_cfg.get("owner_compilation_config")
         server2_comp_cfg = self._hop_cfg.get("server2_compilation_config")
         server3_comp_cfg = self._hop_cfg.get("server3_compilation_config")
@@ -423,7 +483,6 @@ class vLLMHttpServerBase:
         send_activation_margin_tokens = int(self._hop_cfg.get("send_activation_margin_tokens", 512))
         send_publish_token_stride = int(self._hop_cfg.get("send_publish_token_stride", 64))
         owner_flush_each_layer = bool(self._hop_cfg.get("owner_flush_each_layer", False))
-        num_servers = len(server_ports)
 
         if self._hop_cfg.get("enable_cuda_mps", False):
             default_mps = [100, 60] if len(server_ports) == 2 else [100, 60, 40, 20]
@@ -517,8 +576,12 @@ class vLLMHttpServerBase:
             consumer_cvd,
             "--owner-tensor-parallel-size",
             str(owner_tp),
+            "--owner-data-parallel-size",
+            str(owner_dp),
             "--consumer-tensor-parallel-size",
             str(consumer_tp),
+            "--consumer-data-parallel-size",
+            str(consumer_dp),
             "--consumer-attention-backend",
             str(self._hop_cfg.get("consumer_attention_backend", "TORCH_SDPA")),
             "--kv-owner-state-url",
@@ -594,6 +657,11 @@ class vLLMHttpServerBase:
             f"http://{host}:{server_ports[1]}",
             "--server-kv-ports",
             ",".join(str(x) for x in kv_ports),
+            "--server-dp-sizes",
+            ",".join(
+                str(x)
+                for x in ([owner_dp] + [consumer_dp] * max(0, num_servers - 1))
+            ),
             "--routing-mode",
             "sequential_handoff",
             "--decode-cutovers",
@@ -867,33 +935,39 @@ class vLLMHttpServerBase:
             host = str(self._hop_cfg.get("host", "127.0.0.1"))
             server_ports = list(self._hop_cfg.get("server_ports", [8101, 8102]))
             owner_state_port = int(self._hop_cfg.get("owner_state_port", 8300))
+            explicit_server_urls = _parse_hop_url_list(self._hop_cfg.get("server_urls"))
+            if not explicit_server_urls:
+                explicit_server_urls = _parse_hop_url_list(self._hop_cfg.get("server1_urls"))
+                explicit_server_urls += _parse_hop_url_list(self._hop_cfg.get("server2_urls"))
+            owner_state_url = str(self._hop_cfg.get("owner_state_url", "")).rstrip("/")
             handoff_pin_s = float(self._hop_cfg.get("handoff_pin_s", 1.5))
             # Let deferred producer-side frees mature before resetting cache state.
             await asyncio.sleep(max(0.0, handoff_pin_s) + 0.2)
             timeout = httpx.Timeout(30.0, connect=5.0)
             async with httpx.AsyncClient(timeout=timeout) as client:
-                for port in server_ports:
+                reset_targets = explicit_server_urls or [f"http://{host}:{port}" for port in server_ports]
+                for target in reset_targets:
                     try:
-                        resp = await client.post(f"http://{host}:{port}/reset_hop_state")
+                        resp = await client.post(target.rstrip("/") + "/reset_hop_state")
                         resp.raise_for_status()
                     except Exception as exc:
                         logger.warning(
-                            "hop clear_kv_cache reset_hop_state failed upstream=%s:%s err=%r",
-                            host,
-                            port,
+                            "hop clear_kv_cache reset_hop_state failed upstream=%s err=%r",
+                            target,
                             exc,
                         )
                 try:
+                    if not owner_state_url:
+                        owner_state_url = f"http://{host}:{owner_state_port}"
                     resp = await client.post(
-                        f"http://{host}:{owner_state_port}/reset_all",
+                        owner_state_url + "/reset_all",
                         json={"confirm": True},
                     )
                     resp.raise_for_status()
                 except Exception as exc:
                     logger.warning(
-                        "hop clear_kv_cache owner_state reset_all failed host=%s port=%s err=%r",
-                        host,
-                        owner_state_port,
+                        "hop clear_kv_cache owner_state reset_all failed url=%s err=%r",
+                        owner_state_url or f"http://{host}:{owner_state_port}",
                         exc,
                     )
             return
