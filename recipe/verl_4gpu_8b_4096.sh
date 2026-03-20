@@ -41,13 +41,13 @@ rollout_top_p=${ROLLOUT_TOP_P:-0.95}
 rollout_top_k=${ROLLOUT_TOP_K:-20}
 
 # Keep train_batch_size * rollout.n = 128 to match test_qwen8b.py max_num_seqs=128.
-train_prompt_bsz=${TRAIN_PROMPT_BSZ:-64}
-n_resp_per_prompt=${N_RESP_PER_PROMPT:-4}
-rollout_max_num_seqs=${ROLLOUT_MAX_NUM_SEQS:-128}
+train_prompt_bsz=${TRAIN_PROMPT_BSZ:-128}
+n_resp_per_prompt=${N_RESP_PER_PROMPT:-2}
+rollout_max_num_seqs=${ROLLOUT_MAX_NUM_SEQS:-256}
 
 # Actor / PPO
-micro_batch_size=${MICRO_BATCH_SIZE:-4}
-mini_batch_size=${MINI_BATCH_SIZE:-64}
+micro_batch_size=${MICRO_BATCH_SIZE:-2}
+mini_batch_size=${MINI_BATCH_SIZE:-128}
 actor_lr=${ACTOR_LR:-1e-6}
 
 python3 -m verl.trainer.main_ppo \
@@ -77,7 +77,7 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.actor.entropy_coeff=0.0 \
     actor_rollout_ref.actor.fsdp_config.param_offload=False \
     actor_rollout_ref.actor.fsdp_config.optimizer_offload=False \
-    actor_rollout_ref.ref.fsdp_config.param_offload=True \
+    actor_rollout_ref.ref.fsdp_config.param_offload=False \
     actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=${micro_batch_size} \
     actor_rollout_ref.rollout.name=vllm \
     actor_rollout_ref.rollout.mode=async \
@@ -112,7 +112,7 @@ python3 -m verl.trainer.main_ppo \
     trainer.save_freq=0 \
     trainer.test_freq=0 \
     trainer.total_epochs=1 \
-    trainer.total_training_steps=10 \
+    trainer.total_training_steps=3 \
     trainer.default_local_dir="${CKPTS_DIR}" \
     trainer.resume_mode=disable \
     trainer.nnodes="${NNODES}" \
