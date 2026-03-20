@@ -20,6 +20,7 @@ This trainer supports model-agonistic model initialization with huggingface
 
 import ast
 import asyncio
+import base64
 import uuid
 from pprint import pprint
 
@@ -67,6 +68,20 @@ import time
 
 def _load_train_group_plan(default_plan: list[int]) -> list[int]:
     raw = os.getenv("TRAIN_GROUP_PLAN", "").strip()
+    if not raw:
+        raw_hex = os.getenv("TRAIN_GROUP_PLAN_HEX", "").strip()
+        if raw_hex:
+            try:
+                raw = bytes.fromhex(raw_hex).decode("utf-8").strip()
+            except Exception:
+                raw = ""
+    if not raw:
+        raw_b64 = os.getenv("TRAIN_GROUP_PLAN_B64", "").strip()
+        if raw_b64:
+            try:
+                raw = base64.b64decode(raw_b64).decode("utf-8").strip()
+            except Exception:
+                raw = ""
     if not raw:
         return list(default_plan)
     try:
@@ -480,7 +495,7 @@ class OneStepOffRayTrainer(RayPPOTrainer):
         zero_grad = True
         b_id_counter = 0
         # 每次训练触发阈值（以 rollout 分组个数计），按顺序消费
-        train_group_plan = _load_train_group_plan([8] * 14 + [4] * 4)
+        train_group_plan = _load_train_group_plan([48,48,48,48,48,48,48,48,32,32,32,32])
         plan_idx = 0
 
         while True:
