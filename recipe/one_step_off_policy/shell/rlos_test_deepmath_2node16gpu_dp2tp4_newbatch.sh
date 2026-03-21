@@ -28,8 +28,7 @@ WORKER_NODE_IP="${WORKER_NODE_IP:-172.24.79.13}"
 NNODES="${NNODES:-2}"
 NGPUS_PER_NODE="${NGPUS_PER_NODE:-8}"
 EXPECTED_NODES="${EXPECTED_NODES:-2}"
-RAY_DASHBOARD_PORT="${RAY_DASHBOARD_PORT:-8265}"
-
+RAY_ADDRESS="${RAY_ADDRESS:-auto}"
 ETH_IFNAMES="${ETH_IFNAMES:-${ETH_MULTI_NIC_IFACES:-eth0,eth1,eth2,eth3}}"
 PRIMARY_ETH_IFNAME="${PRIMARY_ETH_IFNAME:-${ETH_IFNAMES%%,*}}"
 
@@ -89,24 +88,15 @@ CRITIC_MPS_ACTIVE_THREAD_PERCENTAGE="${CRITIC_MPS_ACTIVE_THREAD_PERCENTAGE:-70}"
 
 VERL_HOP_CONFIG="{enabled:true,external_managed:true,router_urls:${HOP_ROUTER_URLS},owner_state_urls:${HOP_OWNER_STATE_URLS},server1_urls:${HOP_SERVER1_URLS},server2_urls:${HOP_SERVER2_URLS},server_urls:${HOP_SERVER_URLS},decode_cutovers:${HOP_DECODE_CUTOVERS},max_response_length:${max_response_length},request_timeout_s:${HOP_REQUEST_TIMEOUT_S},connect_timeout_s:${HOP_CONNECT_TIMEOUT_S},startup_timeout_s:${HOP_STARTUP_TIMEOUT_S},http_max_connections:${HOP_HTTP_MAX_CONNECTIONS},http_max_keepalive_connections:${HOP_HTTP_MAX_KEEPALIVE_CONNECTIONS},shared_kv_pool_meta_path:'${HOP_SHARED_KV_POOL_META_PATH}',send_activation_margin_tokens:${HOP_SEND_ACTIVATION_MARGIN_TOKENS},send_publish_token_stride:${HOP_SEND_PUBLISH_TOKEN_STRIDE},owner_flush_each_layer:${HOP_OWNER_FLUSH_EACH_LAYER},owner_gpu_memory_utilization:${HOP_OWNER_GPU_MEM_UTIL},consumer_gpu_memory_utilization:${HOP_CONSUMER_GPU_MEM_UTIL},owner_max_num_seqs:${HOP_OWNER_MAX_NUM_SEQS},consumer_max_num_seqs:${HOP_CONSUMER_MAX_NUM_SEQS},owner_tensor_parallel_size:${HOP_OWNER_TP_SIZE},consumer_tensor_parallel_size:${HOP_CONSUMER_TP_SIZE},owner_data_parallel_size:${HOP_OWNER_DP_SIZE},consumer_data_parallel_size:${HOP_CONSUMER_DP_SIZE},consumer_attention_backend:'${HOP_CONSUMER_ATTENTION_BACKEND}',enable_cuda_mps:${HOP_ENABLE_CUDA_MPS},mps_active_thread_percentages:${HOP_MPS_ACTIVE_THREAD_PERCENTAGES},machine_routing_strategy:'${HOP_MACHINE_ROUTING_STRATEGY}'}"
 
-RUNTIME_ENV_JSON="$(python3 - <<PY
-import json
-env = {
-    "TOKENIZERS_PARALLELISM": "false",
-    "TORCH_NCCL_AVOID_RECORD_STREAMS": "1",
-    "CUDA_DEVICE_MAX_CONNECTIONS": "1",
-    "NCCL_DEBUG": "WARN",
-    "TORCH_NCCL_HIGH_PRIORITY": "1",
-    "NCCL_SOCKET_IFNAME": "${ETH_IFNAMES}",
-    "GLOO_SOCKET_IFNAME": "${PRIMARY_ETH_IFNAME}",
-    "NCCL_IB_DISABLE": "1",
-    "NCCL_CROSS_NIC": "1",
-    "TRAIN_GROUP_PLAN_B64": "${TRAIN_GROUP_PLAN_B64}",
-    "CUDA_MPS_ACTIVE_THREAD_PERCENTAGE": "${ACTOR_MPS_ACTIVE_THREAD_PERCENTAGE}",
-}
-print(json.dumps({"working_dir": "/root/A40_verl", "env_vars": env}))
-PY
-)"
+export NCCL_SOCKET_IFNAME="${ETH_IFNAMES}"
+export GLOO_SOCKET_IFNAME="${PRIMARY_ETH_IFNAME}"
+export NCCL_IB_DISABLE=1
+export NCCL_CROSS_NIC=1
+export TORCH_NCCL_AVOID_RECORD_STREAMS=1
+export CUDA_DEVICE_MAX_CONNECTIONS=1
+export NCCL_DEBUG=WARN
+export TORCH_NCCL_HIGH_PRIORITY=1
+export CUDA_MPS_ACTIVE_THREAD_PERCENTAGE="${ACTOR_MPS_ACTIVE_THREAD_PERCENTAGE}"
 
 echo "Waiting for Ray cluster to have ${EXPECTED_NODES} nodes..."
 for _ in $(seq 1 60); do
@@ -130,12 +120,7 @@ done
 
 ray status
 
-ray job submit \
-  --address="http://${HEAD_NODE_IP}:${RAY_DASHBOARD_PORT}" \
-  --runtime-env-json="${RUNTIME_ENV_JSON}" \
-  --no-wait \
-  -- \
-  python3 -m recipe.one_step_off_policy.main_ppo \
+python3 -m recipe.one_step_off_policy.main_ppo \
   algorithm.adv_estimator=grpo \
   data.train_files="${TRAIN_FILE}" \
   data.val_files="${TEST_FILE}" \
@@ -204,4 +189,10 @@ ray job submit \
   trainer.resume_mode=disable \
   trainer.nnodes="${NNODES}" \
   trainer.n_gpus_per_node="${NGPUS_PER_NODE}" \
+  trainer.stream_train=True \
+  "+trainer.stream_train_pipe=False" \
+  "+ray_kwargs.ray_init.address=${RAY_ADDRESS}" \
+  "+ray_kwargs.ray_init.runtime_env.env_vars.TRAIN_GROUP_PLAN_B64=${TRAIN_GROUP_PLAN_B64}" \
+  rollout.nnodes="${NNODES}" \
+  rollout.n_gpus_per_node="${NGPUS_PER_NODE}" \
   "$@"
