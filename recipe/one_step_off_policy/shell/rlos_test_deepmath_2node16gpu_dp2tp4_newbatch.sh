@@ -154,6 +154,7 @@ ray job submit \
   actor_rollout_ref.model.use_remove_padding=True \
   actor_rollout_ref.model.enable_gradient_checkpointing=True \
   actor_rollout_ref.actor.optim.lr="${actor_lr}" \
+  actor_rollout_ref.hybrid_engine=False \
   actor_rollout_ref.actor.ppo_mini_batch_size="${mini_batch_size}" \
   actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu="${micro_batch_size}" \
   actor_rollout_ref.actor.use_kl_loss=True \
