@@ -206,6 +206,8 @@ class vLLMHttpServerBase:
         self._hop_cfg: dict[str, Any] = {}
         self._hop_enabled: bool = False
         self._hop_router_url: str = ""
+        self._hop_router_urls: list[str] = []
+        self._hop_router_rr_cursor: int = 0
         self._hop_http_client: Optional[httpx.AsyncClient] = None
         self._hop_processes: list[subprocess.Popen] = []
 
@@ -372,14 +374,19 @@ class vLLMHttpServerBase:
 
     async def _launch_hop_cluster(self) -> None:
         if bool(self._hop_cfg.get("external_managed", False)):
-            router_url = str(self._hop_cfg.get("router_url", "")).rstrip("/")
-            if not router_url:
-                raise RuntimeError("verl_hop.external_managed requires verl_hop.router_url")
+            router_urls = _parse_hop_url_list(self._hop_cfg.get("router_urls"))
+            if not router_urls:
+                router_url = str(self._hop_cfg.get("router_url", "")).rstrip("/")
+                if router_url:
+                    router_urls = [router_url]
+            if not router_urls:
+                raise RuntimeError("verl_hop.external_managed requires verl_hop.router_url or verl_hop.router_urls")
             request_timeout_s = float(self._hop_cfg.get("request_timeout_s", 600.0))
             connect_timeout_s = float(self._hop_cfg.get("connect_timeout_s", 60.0))
             hop_http_max_connections = int(self._hop_cfg.get("http_max_connections", 1024))
             hop_http_max_keepalive = int(self._hop_cfg.get("http_max_keepalive_connections", 512))
-            self._hop_router_url = router_url
+            self._hop_router_urls = [url.rstrip("/") for url in router_urls]
+            self._hop_router_url = self._hop_router_urls[0]
             self._hop_http_client = httpx.AsyncClient(
                 timeout=httpx.Timeout(request_timeout_s, connect=connect_timeout_s, pool=request_timeout_s),
                 limits=httpx.Limits(
@@ -391,8 +398,8 @@ class vLLMHttpServerBase:
             self._server_address = str(self._hop_cfg.get("router_host", self._server_address))
             self._server_port = int(self._hop_cfg.get("router_port", 8200))
             logger.info(
-                "verl hop using externally managed cluster router=%s owner_state=%s",
-                self._hop_router_url,
+                "verl hop using externally managed cluster routers=%s owner_state=%s",
+                self._hop_router_urls,
                 self._hop_cfg.get("owner_state_url", ""),
             )
             return
@@ -691,6 +698,7 @@ class vLLMHttpServerBase:
         self._hop_processes.append(router_proc)
 
         self._hop_router_url = str(self._hop_cfg.get("router_url", f"http://{host}:{router_port}")).rstrip("/")
+        self._hop_router_urls = [self._hop_router_url]
         self._hop_http_client = httpx.AsyncClient(
             timeout=httpx.Timeout(request_timeout_s, connect=connect_timeout_s, pool=request_timeout_s),
             limits=httpx.Limits(
@@ -721,18 +729,37 @@ class vLLMHttpServerBase:
     async def _wait_hop_router_ready(self, timeout_s: float = 300.0) -> None:
         assert self._hop_http_client is not None
         deadline = time.time() + timeout_s
-        url = self._hop_router_url + "/healthz"
+        urls = self._hop_router_urls or [self._hop_router_url]
+        remaining = set(urls)
         last_err = ""
-        while time.time() < deadline:
-            try:
-                resp = await self._hop_http_client.get(url)
-                if 200 <= resp.status_code < 300:
-                    return
-                last_err = f"status={resp.status_code}"
-            except Exception as exc:
-                last_err = str(exc)
+        while time.time() < deadline and remaining:
+            ready_now: list[str] = []
+            for base_url in list(remaining):
+                try:
+                    resp = await self._hop_http_client.get(base_url + "/healthz")
+                    if 200 <= resp.status_code < 300:
+                        ready_now.append(base_url)
+                    else:
+                        last_err = f"{base_url} status={resp.status_code}"
+                except Exception as exc:
+                    last_err = f"{base_url} {exc}"
+            for base_url in ready_now:
+                remaining.discard(base_url)
+            if not remaining:
+                return
             await asyncio.sleep(1.0)
         raise RuntimeError(f"hop router not ready within {timeout_s}s ({last_err})")
+
+    def _select_hop_router_url(self, request_id: str) -> str:
+        if self._hop_router_urls:
+            strategy = str(self._hop_cfg.get("machine_routing_strategy", "round_robin"))
+            if strategy == "request_id_hash":
+                idx = abs(hash(request_id)) % len(self._hop_router_urls)
+                return self._hop_router_urls[idx]
+            idx = self._hop_router_rr_cursor % len(self._hop_router_urls)
+            self._hop_router_rr_cursor += 1
+            return self._hop_router_urls[idx]
+        return self._hop_router_url
 
     async def _generate_via_hop_router(
         self,
@@ -776,9 +803,12 @@ class vLLMHttpServerBase:
         if sampling_params.get("frequency_penalty") is not None:
             payload["frequency_penalty"] = sampling_params["frequency_penalty"]
 
-        resp = await self._hop_http_client.post(self._hop_router_url + "/v1/completions", json=payload)
+        router_url = self._select_hop_router_url(request_id)
+        resp = await self._hop_http_client.post(router_url + "/v1/completions", json=payload)
         if resp.status_code >= 400:
-            raise RuntimeError(f"hop router error status={resp.status_code} body={resp.text}")
+            raise RuntimeError(
+                f"hop router error router={router_url} status={resp.status_code} body={resp.text}"
+            )
         obj = resp.json()
         choices = obj.get("choices")
         if not isinstance(choices, list) or not choices or not isinstance(choices[0], dict):
@@ -939,6 +969,7 @@ class vLLMHttpServerBase:
             if not explicit_server_urls:
                 explicit_server_urls = _parse_hop_url_list(self._hop_cfg.get("server1_urls"))
                 explicit_server_urls += _parse_hop_url_list(self._hop_cfg.get("server2_urls"))
+            explicit_owner_state_urls = _parse_hop_url_list(self._hop_cfg.get("owner_state_urls"))
             owner_state_url = str(self._hop_cfg.get("owner_state_url", "")).rstrip("/")
             handoff_pin_s = float(self._hop_cfg.get("handoff_pin_s", 1.5))
             # Let deferred producer-side frees mature before resetting cache state.
@@ -956,20 +987,22 @@ class vLLMHttpServerBase:
                             target,
                             exc,
                         )
-                try:
-                    if not owner_state_url:
-                        owner_state_url = f"http://{host}:{owner_state_port}"
-                    resp = await client.post(
-                        owner_state_url + "/reset_all",
-                        json={"confirm": True},
-                    )
-                    resp.raise_for_status()
-                except Exception as exc:
-                    logger.warning(
-                        "hop clear_kv_cache owner_state reset_all failed url=%s err=%r",
-                        owner_state_url or f"http://{host}:{owner_state_port}",
-                        exc,
-                    )
+                owner_state_targets = explicit_owner_state_urls
+                if not owner_state_targets:
+                    owner_state_targets = [owner_state_url or f"http://{host}:{owner_state_port}"]
+                for owner_target in owner_state_targets:
+                    try:
+                        resp = await client.post(
+                            owner_target.rstrip("/") + "/reset_all",
+                            json={"confirm": True},
+                        )
+                        resp.raise_for_status()
+                    except Exception as exc:
+                        logger.warning(
+                            "hop clear_kv_cache owner_state reset_all failed url=%s err=%r",
+                            owner_target,
+                            exc,
+                        )
             return
         if self.node_rank == 0:
             await self.engine.reset_prefix_cache()

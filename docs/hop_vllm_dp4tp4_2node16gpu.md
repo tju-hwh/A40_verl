@@ -73,6 +73,15 @@ Assume:
 - `NODE0_IP=<head machine IP>`
 - `NODE1_IP=<worker machine IP>`
 
+
+  本机清理：
+
+  bash /root/A40_verl/scripts/hop_dp4tp4_2node/clean_all.sh
+
+  如果你想在 node0 上一键把 node1 也一起清掉：
+
+  REMOTE_HOST=172.24.79.13 bash /root/A40_verl/scripts/hop_dp4tp4_2node/clean_all.sh
+
 ### 1. Start Ray
 
 On node0:
