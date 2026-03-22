@@ -79,11 +79,11 @@ bash /root/A40_verl/recipe/start_ray_cluster_rdma.sh worker
 
 5. 在 node1 提交训练：
 
-bash /root/A40_verl/recipe/run_deepmath_sync_grpo_qwen3_8b_2node16gpu_rdma.sh
+<!-- bash /root/A40_verl/recipe/run_deepmath_sync_grpo_qwen3_8b_2node16gpu_rdma.sh -->
 
 bash /root/A40_verl/recipe/run_deepmath_sync_grpo_qwen3_14b_2node16gpu_rdma.sh
 
 6. 看日志：
 
 ray job list --address="http://172.24.79.15:8265"
-ray job logs raysubmit_q94jj3Ue5FzBGm4T --address="http://172.24.79.15:8265" --follow
+ray job logs raysubmit_VMHiuggS4eeRzA6x --address="http://172.24.79.15:8265" --follow
