@@ -48,10 +48,10 @@ rollout_max_num_seqs="${ROLLOUT_MAX_NUM_SEQS:-1024}"
 
 train_prompt_bsz="${TRAIN_PROMPT_BSZ:-512}"
 n_resp_per_prompt="${N_RESP_PER_PROMPT:-2}"
-micro_batch_size="${MICRO_BATCH_SIZE:-16}"
+micro_batch_size="${MICRO_BATCH_SIZE:-8}"
 mini_batch_size="${MINI_BATCH_SIZE:-512}"
 actor_lr="${ACTOR_LR:-1e-6}"
-total_training_steps="${TOTAL_TRAINING_STEPS:-4}"
+total_training_steps="${TOTAL_TRAINING_STEPS:-22}"
 total_epochs="${TOTAL_EPOCHS:-1}"
 
 RUNTIME_ENV_JSON="$(python3 - <<PY
@@ -125,7 +125,7 @@ ray job submit \
   actor_rollout_ref.actor.entropy_coeff=0.0 \
   actor_rollout_ref.actor.fsdp_config.param_offload=False \
   actor_rollout_ref.actor.fsdp_config.optimizer_offload=False \
-  actor_rollout_ref.ref.fsdp_config.param_offload=True \
+  actor_rollout_ref.ref.fsdp_config.param_offload=False \
   actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu="${micro_batch_size}" \
   actor_rollout_ref.rollout.name=vllm \
   actor_rollout_ref.rollout.mode=async \

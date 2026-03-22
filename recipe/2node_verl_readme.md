@@ -86,4 +86,4 @@ bash /root/A40_verl/recipe/run_deepmath_sync_grpo_qwen3_14b_2node16gpu_rdma.sh
 6. 看日志：
 
 ray job list --address="http://172.24.79.15:8265"
-ray job logs raysubmit_JNQhe9uPNFE2M5Yx --address="http://172.24.79.15:8265" --follow
+ray job logs raysubmit_q94jj3Ue5FzBGm4T --address="http://172.24.79.15:8265" --follow
