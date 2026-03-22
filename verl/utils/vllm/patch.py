@@ -102,10 +102,15 @@ def patch_vllm_moe_model_weight_loader(model):
 
     DEFAULT_MLP_ATTR = "mlp"
 
-    # Get inner model (either model.model or model.language_model)
-    inner_model = getattr(model, "model", None) or getattr(model, "language_model", None)
-    if inner_model is None:
-        raise ValueError("The provided model does not have a valid 'model' or 'language_model' attribute.")
+    # Only patch known MoE model families. Many legacy models do not expose a
+    # nested `model` / `language_model` wrapper, and they do not need this
+    # workaround at all.
+    if isinstance(model, tuple(SUPPORTED_MOE_MODELS)):
+        inner_model = model
+    else:
+        inner_model = getattr(model, "model", None) or getattr(model, "language_model", None)
+        if inner_model is None or not isinstance(inner_model, tuple(SUPPORTED_MOE_MODELS)):
+            return
 
     if not isinstance(model, tuple(SUPPORTED_MOE_MODELS)) and not isinstance(inner_model, tuple(SUPPORTED_MOE_MODELS)):
         return

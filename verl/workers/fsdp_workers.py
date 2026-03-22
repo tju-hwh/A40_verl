@@ -16,6 +16,7 @@ The main entry point to run the PPO algorithm
 """
 
 import datetime
+import itertools
 import json
 import logging
 import os
@@ -401,8 +402,19 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                 fused_kernels_backend=fused_kernels_backend,
             )
 
-            # some parameters may not in torch_dtype. TODO(zhangchi.usc1992) remove this after we switch to fsdp2
-            actor_module.to(torch_dtype)
+            # Some remote-code models already honor `torch_dtype` in from_pretrained.
+            # Avoid an extra full-module dtype conversion when all realized params/buffers
+            # are already in the target dtype, because it can be extremely slow for
+            # large legacy models.
+            needs_dtype_cast = False
+            for tensor in itertools.chain(actor_module.parameters(), actor_module.buffers()):
+                if getattr(tensor, "is_meta", False):
+                    continue
+                if tensor.is_floating_point() and tensor.dtype != torch_dtype:
+                    needs_dtype_cast = True
+                    break
+            if needs_dtype_cast:
+                actor_module.to(torch_dtype)
 
             if enable_gradient_checkpointing:
                 actor_module.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})

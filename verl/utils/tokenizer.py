@@ -18,6 +18,19 @@ import warnings
 __all__ = ["hf_tokenizer", "hf_processor"]
 
 
+_QWEN_LEGACY_CHAT_TEMPLATE = (
+    "{% for message in messages %}"
+    "{% if loop.first and messages[0]['role'] != 'system' %}"
+    "{{ '<|im_start|>system\\nYou are a helpful assistant<|im_end|>\\n' }}"
+    "{% endif %}"
+    "{{ '<|im_start|>' + message['role'] + '\\n' + message['content'] + '<|im_end|>\\n' }}"
+    "{% endfor %}"
+    "{% if add_generation_prompt %}"
+    "{{ '<|im_start|>assistant\\n' }}"
+    "{% endif %}"
+)
+
+
 def set_pad_token_id(tokenizer):
     """Set pad_token_id to eos_token_id if it is None.
 
@@ -25,6 +38,23 @@ def set_pad_token_id(tokenizer):
         tokenizer (transformers.PreTrainedTokenizer): The tokenizer to be set.
 
     """
+    if tokenizer.eos_token_id is None:
+        fallback_eos_id = getattr(tokenizer, "im_end_id", None)
+        if fallback_eos_id is None:
+            fallback_eos_id = getattr(tokenizer, "eod_id", None)
+        if fallback_eos_id is not None:
+            tokenizer.eos_token_id = fallback_eos_id
+            try:
+                tokenizer.eos_token = tokenizer.convert_ids_to_tokens(fallback_eos_id)
+            except Exception:
+                pass
+            warnings.warn(f"tokenizer.eos_token_id is None. Now set to {fallback_eos_id}", stacklevel=1)
+    if tokenizer.eos_token is None and tokenizer.eos_token_id is not None:
+        try:
+            tokenizer.eos_token = tokenizer.convert_ids_to_tokens(tokenizer.eos_token_id)
+            warnings.warn(f"tokenizer.eos_token is None. Now set to {tokenizer.eos_token}", stacklevel=1)
+        except Exception:
+            pass
     if tokenizer.pad_token_id is None:
         tokenizer.pad_token_id = tokenizer.eos_token_id
         warnings.warn(f"tokenizer.pad_token_id is None. Now set to {tokenizer.eos_token_id}", stacklevel=1)
@@ -58,6 +88,15 @@ def hf_tokenizer(name_or_path, correct_pad_token=True, correct_gemma2=True, **kw
         kwargs["eos_token"] = "<end_of_turn>"
         kwargs["eos_token_id"] = 107
     tokenizer = AutoTokenizer.from_pretrained(name_or_path, **kwargs)
+    # Legacy Qwen models ship custom tokenizers but no tokenizer.chat_template.
+    # VERL's RL dataset always calls apply_chat_template for chat-format prompts,
+    # so inject a compatible default here to keep old Qwen checkpoints usable.
+    if getattr(tokenizer, "chat_template", None) is None:
+        tokenizer_cls_name = tokenizer.__class__.__name__
+        if tokenizer_cls_name == "QWenTokenizer" or (
+            isinstance(name_or_path, str) and "/Qwen-" in name_or_path and "Qwen3" not in name_or_path
+        ):
+            tokenizer.chat_template = _QWEN_LEGACY_CHAT_TEMPLATE
     if correct_pad_token:
         set_pad_token_id(tokenizer)
     return tokenizer

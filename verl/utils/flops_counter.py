@@ -141,7 +141,7 @@ class FlopsCounter:
             "apertus": self._estimate_apertus_flops,
             "glm4v": self._estimate_qwen2_flops,
         }
-        self.config = getattr(config, "text_config", config)
+        self.config = getattr(config, "text_config", None) or config
 
     def _estimate_unknown_flops(self, tokens_sum, batch_seqlens, delta_time):
         return 0
@@ -390,6 +390,8 @@ class FlopsCounter:
             promised_flops (float): The expected FLOPS of the current device.
         """
         tokens_sum = sum(batch_seqlens)
+        if self.config is None:
+            return 0, get_device_flops()
         func = self.estimate_func.get(self.config.model_type, self._estimate_unknown_flops)
         estimated_flops = func(tokens_sum, batch_seqlens, delta_time)
         promised_flops = get_device_flops()
