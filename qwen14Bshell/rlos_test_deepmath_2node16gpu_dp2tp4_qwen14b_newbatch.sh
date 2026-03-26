@@ -43,6 +43,7 @@ rollout_temperature="${ROLLOUT_TEMPERATURE:-0.25}"
 rollout_top_p="${ROLLOUT_TOP_P:-0.95}"
 rollout_top_k="${ROLLOUT_TOP_K:-20}"
 rollout_max_num_seqs="${ROLLOUT_MAX_NUM_SEQS:-1024}"
+TRAIN_ATTN_IMPLEMENTATION="${TRAIN_ATTN_IMPLEMENTATION:-eager}"
 
 train_prompt_bsz="${TRAIN_PROMPT_BSZ:-128}"
 n_resp_per_prompt="${N_RESP_PER_PROMPT:-2}"
@@ -147,6 +148,8 @@ python3 -m recipe.one_step_off_policy.main_ppo \
   actor_rollout_ref.model.path="${MODEL_PATH}" \
   actor_rollout_ref.model.trust_remote_code="${TRUST_REMOTE_CODE}" \
   "+actor_rollout_ref.model.custom_chat_template=${CHAT_TEMPLATE_JSON}" \
+  "+actor_rollout_ref.model.override_config.attn_implementation=${TRAIN_ATTN_IMPLEMENTATION}" \
+  actor_rollout_ref.model.use_remove_padding=False \
   actor_rollout_ref.actor.strategy=fsdp2 \
   critic.strategy=fsdp2 \
   actor_rollout_ref.model.use_remove_padding=True \

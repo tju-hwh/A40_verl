@@ -262,12 +262,19 @@ def apply_monkey_patch(
     """Replace _flash_attention_forward to _ulysses_flash_attention_forward"""
     module = sys.modules[model.__module__]
 
-    try:
-        num_attention_heads, num_key_value_heads = model.config.num_attention_heads, model.config.num_key_value_heads
-    except AttributeError:
-        num_attention_heads, num_key_value_heads = (
-            model.config.text_config.num_attention_heads,
-            model.config.text_config.num_key_value_heads,
+    if hasattr(model.config, "num_attention_heads"):
+        num_attention_heads = model.config.num_attention_heads
+        num_key_value_heads = getattr(
+            model.config,
+            "num_key_value_heads",
+            num_attention_heads,
+        )
+    else:
+        num_attention_heads = model.config.text_config.num_attention_heads
+        num_key_value_heads = getattr(
+            model.config.text_config,
+            "num_key_value_heads",
+            num_attention_heads,
         )
 
     assert num_attention_heads % ulysses_sp_size == 0, (
