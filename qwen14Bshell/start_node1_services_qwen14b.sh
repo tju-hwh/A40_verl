@@ -13,10 +13,12 @@ RUNTIME_DIR="${RUNTIME_DIR:-/tmp/qwen14b_2server_hop_dptp_172_24_79_13}"
 RAY_PORT="${RAY_PORT:-6379}"
 ETH_IFNAMES="${ETH_IFNAMES:-eth0,eth1,eth2,eth3}"
 HF_MODULES_CACHE="${HF_MODULES_CACHE:-/root/.cache/huggingface/modules}"
+VLLM_SRC_ROOT="${VLLM_SRC_ROOT:-/root/vllm}"
 
 export NCCL_SOCKET_IFNAME="${ETH_IFNAMES}"
 export GLOO_SOCKET_IFNAME="${ETH_IFNAMES}"
 export HF_MODULES_CACHE
+export PYTHONPATH="${VLLM_SRC_ROOT}:${HF_MODULES_CACHE}:${PYTHONPATH:-}"
 
 python - <<'PY'
 from transformers import AutoConfig, AutoTokenizer
@@ -41,6 +43,8 @@ nohup env \
   MODEL_PATH="${MODEL_PATH}" \
   RUNTIME_DIR="${RUNTIME_DIR}" \
   CUDA_VISIBLE_DEVICES_LOCAL="${CUDA_VISIBLE_DEVICES_LOCAL}" \
+  VLLM_SRC_ROOT="${VLLM_SRC_ROOT}" \
+  PYTHONPATH="${PYTHONPATH}" \
   bash /root/A40_verl/qwen14Bshell/start_qwen14b_2server_hop_dptp_new_serve.sh \
   >"${HOP_LOG}" 2>&1 &
 

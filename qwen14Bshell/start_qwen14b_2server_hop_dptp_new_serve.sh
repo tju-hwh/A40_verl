@@ -9,6 +9,7 @@ CUDA_VISIBLE_DEVICES_LOCAL="${CUDA_VISIBLE_DEVICES_LOCAL:-0,1,2,3,4,5,6,7}"
 MODEL_PATH="${MODEL_PATH:-/root/model/Qwen-14B}"
 PYTHON_BIN="${PYTHON_BIN:-/root/anaconda3/envs/verl/bin/python}"
 HF_MODULES_CACHE="${HF_MODULES_CACHE:-/root/.cache/huggingface/modules}"
+VLLM_SRC_ROOT="${VLLM_SRC_ROOT:-/root/vllm}"
 
 DP_SIZE="${DP_SIZE:-2}"
 TP_SIZE="${TP_SIZE:-4}"
@@ -37,6 +38,7 @@ RUNTIME_DIR="${RUNTIME_DIR:-/tmp/qwen14b_2server_hop_dptp_${NODE_IP//./_}}"
 
 cd /root
 export HF_MODULES_CACHE
+export PYTHONPATH="${VLLM_SRC_ROOT}:${HF_MODULES_CACHE}:${PYTHONPATH:-}"
 
 cmd=(
   python /root/A40_verl/qwen14Bshell/test_qwen14b_2server_hop_dptp_new.py

@@ -22,6 +22,7 @@ MODEL_PATH="${MODEL_PATH:-/root/model/Qwen-14B}"
 TRUST_REMOTE_CODE="${TRUST_REMOTE_CODE:-true}"
 CHAT_TEMPLATE_FILE="${CHAT_TEMPLATE_FILE:-/root/A40_verl/qwen14Bshell/qwen_chat_template.jinja}"
 HF_MODULES_CACHE="${HF_MODULES_CACHE:-/root/.cache/huggingface/modules}"
+VLLM_SRC_ROOT="${VLLM_SRC_ROOT:-/root/vllm}"
 TRAIN_FILE="${TRAIN_FILE:-/root/data/deepmath/train.parquet}"
 TEST_FILE="${TEST_FILE:-/root/data/deepmath/test.parquet}"
 CKPTS_DIR="${CKPTS_DIR:-/root/A40_verl/ckpts/${project_name}/${exp_name}}"
@@ -109,6 +110,7 @@ export TORCH_NCCL_HIGH_PRIORITY=1
 export CUDA_MPS_ACTIVE_THREAD_PERCENTAGE="${ACTOR_MPS_ACTIVE_THREAD_PERCENTAGE}"
 export RAY_ACCEL_ENV_VAR_OVERRIDE_ON_ZERO=0
 export HF_MODULES_CACHE
+export PYTHONPATH="${VLLM_SRC_ROOT}:${HF_MODULES_CACHE}:${PYTHONPATH:-}"
 
 python3 - <<'PY'
 from transformers import AutoConfig, AutoTokenizer
@@ -224,6 +226,8 @@ python3 -m recipe.one_step_off_policy.main_ppo \
   "+ray_kwargs.ray_init.address=${RAY_ADDRESS}" \
   "+ray_kwargs.ray_init.runtime_env.env_vars.TRAIN_GROUP_PLAN_HEX=${TRAIN_GROUP_PLAN_HEX}" \
   "+ray_kwargs.ray_init.runtime_env.env_vars.HF_MODULES_CACHE=${HF_MODULES_CACHE}" \
+  "+ray_kwargs.ray_init.runtime_env.env_vars.VLLM_SRC_ROOT=${VLLM_SRC_ROOT}" \
+  "+ray_kwargs.ray_init.runtime_env.env_vars.PYTHONPATH=${PYTHONPATH}" \
   rollout.nnodes="${NNODES}" \
   rollout.n_gpus_per_node="${NGPUS_PER_NODE}" \
   "$@"
