@@ -36,8 +36,8 @@ max_prompt_length="${MAX_PROMPT_LENGTH:-1024}"
 max_response_length="${MAX_RESPONSE_LENGTH:-4096}"
 rollout_max_model_len="${ROLLOUT_MAX_MODEL_LEN:-5120}"
 rollout_tp="${ROLLOUT_TP:-4}"
-rollout_gpu_mem_util="${ROLLOUT_GPU_MEM_UTIL:-0.25}"
-rollout_temperature="${ROLLOUT_TEMPERATURE:-0.25}"
+rollout_gpu_mem_util="${ROLLOUT_GPU_MEM_UTIL:-0.24}"
+rollout_temperature="${ROLLOUT_TEMPERATURE:-0.24}"
 rollout_top_p="${ROLLOUT_TOP_P:-0.95}"
 rollout_top_k="${ROLLOUT_TOP_K:-20}"
 rollout_max_num_seqs="${ROLLOUT_MAX_NUM_SEQS:-1024}"
@@ -50,8 +50,8 @@ actor_lr="${ACTOR_LR:-1e-6}"
 total_training_steps="${TOTAL_TRAINING_STEPS:-5}"
 total_epochs="${TOTAL_EPOCHS:-1}"
 
-TRAIN_GROUP_PLAN="${TRAIN_GROUP_PLAN:-[64,64,64,64,64,64,64,32,32]}"
-TRAIN_GROUP_PLAN_B64="$(printf '%s' "${TRAIN_GROUP_PLAN}" | base64 -w0)"
+TRAIN_GROUP_PLAN="${TRAIN_GROUP_PLAN:-[64,64,64,64,64,48,48,48,48]}"
+TRAIN_GROUP_PLAN_HEX="$(printf '%s' "${TRAIN_GROUP_PLAN}" | xxd -p -c 256)"
 
 HOP_ROUTER_URLS="${HOP_ROUTER_URLS:-['http://${HEAD_NODE_IP}:8200','http://${WORKER_NODE_IP}:8200']}"
 HOP_OWNER_STATE_URLS="${HOP_OWNER_STATE_URLS:-['http://${HEAD_NODE_IP}:8300','http://${WORKER_NODE_IP}:8300']}"
@@ -66,11 +66,11 @@ HOP_HTTP_MAX_CONNECTIONS="${HOP_HTTP_MAX_CONNECTIONS:-256}"
 HOP_HTTP_MAX_KEEPALIVE_CONNECTIONS="${HOP_HTTP_MAX_KEEPALIVE_CONNECTIONS:-256}"
 HOP_SHARED_KV_POOL_META_PATH="${HOP_SHARED_KV_POOL_META_PATH:-/dev/shm/vllm_shared_kv_pool_newbatch}"
 HOP_SEND_ACTIVATION_MARGIN_TOKENS="${HOP_SEND_ACTIVATION_MARGIN_TOKENS:-0}"
-HOP_SEND_PUBLISH_TOKEN_STRIDE="${HOP_SEND_PUBLISH_TOKEN_STRIDE:-2048}"
-HOP_DECODE_CUTOVERS="${HOP_DECODE_CUTOVERS:-[1536]}"
+HOP_SEND_PUBLISH_TOKEN_STRIDE="${HOP_SEND_PUBLISH_TOKEN_STRIDE:-1536}"
+HOP_DECODE_CUTOVERS="${HOP_DECODE_CUTOVERS:-[1024]}"
 HOP_OWNER_FLUSH_EACH_LAYER="${HOP_OWNER_FLUSH_EACH_LAYER:-false}"
-HOP_OWNER_GPU_MEM_UTIL="${HOP_OWNER_GPU_MEM_UTIL:-0.25}"
-HOP_CONSUMER_GPU_MEM_UTIL="${HOP_CONSUMER_GPU_MEM_UTIL:-0.25}"
+HOP_OWNER_GPU_MEM_UTIL="${HOP_OWNER_GPU_MEM_UTIL:-0.24}"
+HOP_CONSUMER_GPU_MEM_UTIL="${HOP_CONSUMER_GPU_MEM_UTIL:-0.24}"
 HOP_OWNER_MAX_NUM_SEQS="${HOP_OWNER_MAX_NUM_SEQS:-1024}"
 HOP_CONSUMER_MAX_NUM_SEQS="${HOP_CONSUMER_MAX_NUM_SEQS:-1024}"
 HOP_OWNER_TP_SIZE="${HOP_OWNER_TP_SIZE:-4}"
@@ -78,13 +78,13 @@ HOP_CONSUMER_TP_SIZE="${HOP_CONSUMER_TP_SIZE:-4}"
 HOP_OWNER_DP_SIZE="${HOP_OWNER_DP_SIZE:-2}"
 HOP_CONSUMER_DP_SIZE="${HOP_CONSUMER_DP_SIZE:-2}"
 HOP_ENABLE_CUDA_MPS="${HOP_ENABLE_CUDA_MPS:-true}"
-HOP_MPS_ACTIVE_THREAD_PERCENTAGES="${HOP_MPS_ACTIVE_THREAD_PERCENTAGES:-[100,60]}"
+HOP_MPS_ACTIVE_THREAD_PERCENTAGES="${HOP_MPS_ACTIVE_THREAD_PERCENTAGES:-[100,40]}"
 HOP_CONSUMER_ATTENTION_BACKEND="${HOP_CONSUMER_ATTENTION_BACKEND:-FLASH_ATTN}"
 HOP_MACHINE_ROUTING_STRATEGY="${HOP_MACHINE_ROUTING_STRATEGY:-round_robin}"
 
-ACTOR_MPS_ACTIVE_THREAD_PERCENTAGE="${ACTOR_MPS_ACTIVE_THREAD_PERCENTAGE:-70}"
-REF_MPS_ACTIVE_THREAD_PERCENTAGE="${REF_MPS_ACTIVE_THREAD_PERCENTAGE:-70}"
-CRITIC_MPS_ACTIVE_THREAD_PERCENTAGE="${CRITIC_MPS_ACTIVE_THREAD_PERCENTAGE:-70}"
+ACTOR_MPS_ACTIVE_THREAD_PERCENTAGE="${ACTOR_MPS_ACTIVE_THREAD_PERCENTAGE:-100}"
+REF_MPS_ACTIVE_THREAD_PERCENTAGE="${REF_MPS_ACTIVE_THREAD_PERCENTAGE:-100}"
+CRITIC_MPS_ACTIVE_THREAD_PERCENTAGE="${CRITIC_MPS_ACTIVE_THREAD_PERCENTAGE:-100}"
 
 VERL_HOP_CONFIG="{enabled:true,external_managed:true,router_urls:${HOP_ROUTER_URLS},owner_state_urls:${HOP_OWNER_STATE_URLS},server1_urls:${HOP_SERVER1_URLS},server2_urls:${HOP_SERVER2_URLS},server_urls:${HOP_SERVER_URLS},decode_cutovers:${HOP_DECODE_CUTOVERS},max_response_length:${max_response_length},request_timeout_s:${HOP_REQUEST_TIMEOUT_S},connect_timeout_s:${HOP_CONNECT_TIMEOUT_S},startup_timeout_s:${HOP_STARTUP_TIMEOUT_S},http_max_connections:${HOP_HTTP_MAX_CONNECTIONS},http_max_keepalive_connections:${HOP_HTTP_MAX_KEEPALIVE_CONNECTIONS},shared_kv_pool_meta_path:'${HOP_SHARED_KV_POOL_META_PATH}',send_activation_margin_tokens:${HOP_SEND_ACTIVATION_MARGIN_TOKENS},send_publish_token_stride:${HOP_SEND_PUBLISH_TOKEN_STRIDE},owner_flush_each_layer:${HOP_OWNER_FLUSH_EACH_LAYER},owner_gpu_memory_utilization:${HOP_OWNER_GPU_MEM_UTIL},consumer_gpu_memory_utilization:${HOP_CONSUMER_GPU_MEM_UTIL},owner_max_num_seqs:${HOP_OWNER_MAX_NUM_SEQS},consumer_max_num_seqs:${HOP_CONSUMER_MAX_NUM_SEQS},owner_tensor_parallel_size:${HOP_OWNER_TP_SIZE},consumer_tensor_parallel_size:${HOP_CONSUMER_TP_SIZE},owner_data_parallel_size:${HOP_OWNER_DP_SIZE},consumer_data_parallel_size:${HOP_CONSUMER_DP_SIZE},consumer_attention_backend:'${HOP_CONSUMER_ATTENTION_BACKEND}',enable_cuda_mps:${HOP_ENABLE_CUDA_MPS},mps_active_thread_percentages:${HOP_MPS_ACTIVE_THREAD_PERCENTAGES},machine_routing_strategy:'${HOP_MACHINE_ROUTING_STRATEGY}'}"
 
@@ -97,6 +97,7 @@ export CUDA_DEVICE_MAX_CONNECTIONS=1
 export NCCL_DEBUG=WARN
 export TORCH_NCCL_HIGH_PRIORITY=1
 export CUDA_MPS_ACTIVE_THREAD_PERCENTAGE="${ACTOR_MPS_ACTIVE_THREAD_PERCENTAGE}"
+export RAY_ACCEL_ENV_VAR_OVERRIDE_ON_ZERO=0
 
 echo "Waiting for Ray cluster to have ${EXPECTED_NODES} nodes..."
 for _ in $(seq 1 60); do
@@ -146,9 +147,10 @@ python3 -m recipe.one_step_off_policy.main_ppo \
   actor_rollout_ref.actor.kl_loss_coef=0.001 \
   actor_rollout_ref.actor.kl_loss_type=low_var_kl \
   actor_rollout_ref.actor.entropy_coeff=0.0 \
+  actor_rollout_ref.model.enable_activation_offload=True \
   actor_rollout_ref.actor.fsdp_config.param_offload=False \
-  actor_rollout_ref.actor.fsdp_config.optimizer_offload=False \
-  actor_rollout_ref.ref.fsdp_config.param_offload=True \
+  actor_rollout_ref.actor.fsdp_config.optimizer_offload=True \
+  actor_rollout_ref.ref.fsdp_config.param_offload=False \
   actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu="${micro_batch_size}" \
   actor_rollout_ref.rollout.name=vllm \
   actor_rollout_ref.rollout.mode=async \
@@ -192,7 +194,7 @@ python3 -m recipe.one_step_off_policy.main_ppo \
   trainer.stream_train=True \
   "+trainer.stream_train_pipe=False" \
   "+ray_kwargs.ray_init.address=${RAY_ADDRESS}" \
-  "+ray_kwargs.ray_init.runtime_env.env_vars.TRAIN_GROUP_PLAN_B64=${TRAIN_GROUP_PLAN_B64}" \
+  "+ray_kwargs.ray_init.runtime_env.env_vars.TRAIN_GROUP_PLAN_HEX=${TRAIN_GROUP_PLAN_HEX}" \
   rollout.nnodes="${NNODES}" \
   rollout.n_gpus_per_node="${NGPUS_PER_NODE}" \
   "$@"
