@@ -16,9 +16,9 @@ if [[ -f "${ETH_ENV_FILE}" ]]; then
 fi
 
 project_name="${PROJECT_NAME:-GRPO}"
-exp_name="${EXP_NAME:-deepmath-qwen3-8b-hop-dp2tp4-newbatch-2node16gpu}"
+exp_name="${EXP_NAME:-deepmath-qwen14b-hop-dp2tp4-newbatch-2node16gpu}"
 
-MODEL_PATH="${MODEL_PATH:-/root/model/Qwen3-8B}"
+MODEL_PATH="${MODEL_PATH:-/root/model/Qwen-14B}"
 TRAIN_FILE="${TRAIN_FILE:-/root/data/deepmath/train.parquet}"
 TEST_FILE="${TEST_FILE:-/root/data/deepmath/test.parquet}"
 CKPTS_DIR="${CKPTS_DIR:-/root/A40_verl/ckpts/${project_name}/${exp_name}}"
@@ -37,12 +37,12 @@ max_response_length="${MAX_RESPONSE_LENGTH:-4096}"
 rollout_max_model_len="${ROLLOUT_MAX_MODEL_LEN:-5120}"
 rollout_tp="${ROLLOUT_TP:-4}"
 rollout_gpu_mem_util="${ROLLOUT_GPU_MEM_UTIL:-0.24}"
-rollout_temperature="${ROLLOUT_TEMPERATURE:-0.24}"
+rollout_temperature="${ROLLOUT_TEMPERATURE:-0.25}"
 rollout_top_p="${ROLLOUT_TOP_P:-0.95}"
 rollout_top_k="${ROLLOUT_TOP_K:-20}"
 rollout_max_num_seqs="${ROLLOUT_MAX_NUM_SEQS:-1024}"
 
-train_prompt_bsz="${TRAIN_PROMPT_BSZ:-512}"
+train_prompt_bsz="${TRAIN_PROMPT_BSZ:-128}"
 n_resp_per_prompt="${N_RESP_PER_PROMPT:-2}"
 micro_batch_size="${MICRO_BATCH_SIZE:-8}"
 mini_batch_size="${MINI_BATCH_SIZE:-512}"
@@ -50,9 +50,7 @@ actor_lr="${ACTOR_LR:-1e-6}"
 total_training_steps="${TOTAL_TRAINING_STEPS:-5}"
 total_epochs="${TOTAL_EPOCHS:-1}"
 
-#吞吐505 TRAIN_GROUP_PLAN="${TRAIN_GROUP_PLAN:-[64,64,64,64,64,48,48,48,48]}"
-# 吞吐405 TRAIN_GROUP_PLAN="${TRAIN_GROUP_PLAN:-[80,80,80,80,48,48,48,48]}"
-TRAIN_GROUP_PLAN="${TRAIN_GROUP_PLAN:-[64,64,64,64,64,48,48,48,48]}"
+TRAIN_GROUP_PLAN="${TRAIN_GROUP_PLAN:-[16,16,16,16,16,16,16,16]}"
 TRAIN_GROUP_PLAN_HEX="$(printf '%s' "${TRAIN_GROUP_PLAN}" | xxd -p -c 256)"
 
 HOP_ROUTER_URLS="${HOP_ROUTER_URLS:-['http://${HEAD_NODE_IP}:8200','http://${WORKER_NODE_IP}:8200']}"
@@ -66,7 +64,7 @@ HOP_CONNECT_TIMEOUT_S="${HOP_CONNECT_TIMEOUT_S:-60.0}"
 HOP_STARTUP_TIMEOUT_S="${HOP_STARTUP_TIMEOUT_S:-900.0}"
 HOP_HTTP_MAX_CONNECTIONS="${HOP_HTTP_MAX_CONNECTIONS:-256}"
 HOP_HTTP_MAX_KEEPALIVE_CONNECTIONS="${HOP_HTTP_MAX_KEEPALIVE_CONNECTIONS:-256}"
-HOP_SHARED_KV_POOL_META_PATH="${HOP_SHARED_KV_POOL_META_PATH:-/dev/shm/vllm_shared_kv_pool_newbatch}"
+HOP_SHARED_KV_POOL_META_PATH="${HOP_SHARED_KV_POOL_META_PATH:-/dev/shm/vllm_shared_kv_pool_qwen14b_newbatch}"
 HOP_SEND_ACTIVATION_MARGIN_TOKENS="${HOP_SEND_ACTIVATION_MARGIN_TOKENS:-0}"
 HOP_SEND_PUBLISH_TOKEN_STRIDE="${HOP_SEND_PUBLISH_TOKEN_STRIDE:-1536}"
 HOP_DECODE_CUTOVERS="${HOP_DECODE_CUTOVERS:-[1024]}"
@@ -182,7 +180,7 @@ python3 -m recipe.one_step_off_policy.main_ppo \
   reward_model.reward_manager=naive \
   trainer.critic_warmup=0 \
   trainer.val_before_train=False \
-  trainer.logger='["console","tensorboard"]' \
+  trainer.logger='[\"console\",\"tensorboard\"]' \
   trainer.project_name="${project_name}" \
   trainer.experiment_name="${exp_name}" \
   trainer.save_freq=0 \
