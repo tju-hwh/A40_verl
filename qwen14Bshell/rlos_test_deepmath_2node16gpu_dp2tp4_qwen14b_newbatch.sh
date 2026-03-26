@@ -20,6 +20,7 @@ exp_name="${EXP_NAME:-deepmath-qwen14b-hop-dp2tp4-newbatch-2node16gpu}"
 
 MODEL_PATH="${MODEL_PATH:-/root/model/Qwen-14B}"
 TRUST_REMOTE_CODE="${TRUST_REMOTE_CODE:-true}"
+CHAT_TEMPLATE_FILE="${CHAT_TEMPLATE_FILE:-/root/A40_verl/qwen14Bshell/qwen_chat_template.jinja}"
 TRAIN_FILE="${TRAIN_FILE:-/root/data/deepmath/train.parquet}"
 TEST_FILE="${TEST_FILE:-/root/data/deepmath/test.parquet}"
 CKPTS_DIR="${CKPTS_DIR:-/root/A40_verl/ckpts/${project_name}/${exp_name}}"
@@ -53,6 +54,12 @@ total_epochs="${TOTAL_EPOCHS:-1}"
 
 TRAIN_GROUP_PLAN="${TRAIN_GROUP_PLAN:-[16,16,16,16,16,16,16,16]}"
 TRAIN_GROUP_PLAN_HEX="$(printf '%s' "${TRAIN_GROUP_PLAN}" | xxd -p -c 256)"
+CHAT_TEMPLATE_JSON="$(python3 - <<PY
+import json
+from pathlib import Path
+print(json.dumps(Path(r"${CHAT_TEMPLATE_FILE}").read_text()))
+PY
+)"
 
 HOP_ROUTER_URLS="${HOP_ROUTER_URLS:-['http://${HEAD_NODE_IP}:8200','http://${WORKER_NODE_IP}:8200']}"
 HOP_OWNER_STATE_URLS="${HOP_OWNER_STATE_URLS:-['http://${HEAD_NODE_IP}:8300','http://${WORKER_NODE_IP}:8300']}"
@@ -130,6 +137,7 @@ python3 -m recipe.one_step_off_policy.main_ppo \
   data.reward_fn_key=data_source \
   data.return_raw_chat=True \
   data.trust_remote_code="${TRUST_REMOTE_CODE}" \
+  "+data.apply_chat_template_kwargs.chat_template=${CHAT_TEMPLATE_JSON}" \
   +data.apply_chat_template_kwargs.enable_thinking=False \
   data.max_prompt_length="${max_prompt_length}" \
   data.max_response_length="${max_response_length}" \
@@ -138,6 +146,7 @@ python3 -m recipe.one_step_off_policy.main_ppo \
   data.train_batch_size="${train_prompt_bsz}" \
   actor_rollout_ref.model.path="${MODEL_PATH}" \
   actor_rollout_ref.model.trust_remote_code="${TRUST_REMOTE_CODE}" \
+  "+actor_rollout_ref.model.custom_chat_template=${CHAT_TEMPLATE_JSON}" \
   actor_rollout_ref.actor.strategy=fsdp2 \
   critic.strategy=fsdp2 \
   actor_rollout_ref.model.use_remove_padding=True \
