@@ -19,6 +19,7 @@ project_name="${PROJECT_NAME:-GRPO}"
 exp_name="${EXP_NAME:-deepmath-qwen14b-hop-dp2tp4-newbatch-2node16gpu}"
 
 MODEL_PATH="${MODEL_PATH:-/root/model/Qwen-14B}"
+TRUST_REMOTE_CODE="${TRUST_REMOTE_CODE:-true}"
 TRAIN_FILE="${TRAIN_FILE:-/root/data/deepmath/train.parquet}"
 TEST_FILE="${TEST_FILE:-/root/data/deepmath/test.parquet}"
 CKPTS_DIR="${CKPTS_DIR:-/root/A40_verl/ckpts/${project_name}/${exp_name}}"
@@ -45,7 +46,7 @@ rollout_max_num_seqs="${ROLLOUT_MAX_NUM_SEQS:-1024}"
 train_prompt_bsz="${TRAIN_PROMPT_BSZ:-128}"
 n_resp_per_prompt="${N_RESP_PER_PROMPT:-2}"
 micro_batch_size="${MICRO_BATCH_SIZE:-8}"
-mini_batch_size="${MINI_BATCH_SIZE:-512}"
+mini_batch_size="${MINI_BATCH_SIZE:-128}"
 actor_lr="${ACTOR_LR:-1e-6}"
 total_training_steps="${TOTAL_TRAINING_STEPS:-5}"
 total_epochs="${TOTAL_EPOCHS:-1}"
@@ -128,6 +129,7 @@ python3 -m recipe.one_step_off_policy.main_ppo \
   data.prompt_key=prompt \
   data.reward_fn_key=data_source \
   data.return_raw_chat=True \
+  data.trust_remote_code="${TRUST_REMOTE_CODE}" \
   +data.apply_chat_template_kwargs.enable_thinking=False \
   data.max_prompt_length="${max_prompt_length}" \
   data.max_response_length="${max_response_length}" \
@@ -135,6 +137,7 @@ python3 -m recipe.one_step_off_policy.main_ppo \
   data.truncation=error \
   data.train_batch_size="${train_prompt_bsz}" \
   actor_rollout_ref.model.path="${MODEL_PATH}" \
+  actor_rollout_ref.model.trust_remote_code="${TRUST_REMOTE_CODE}" \
   actor_rollout_ref.actor.strategy=fsdp2 \
   critic.strategy=fsdp2 \
   actor_rollout_ref.model.use_remove_padding=True \
@@ -180,7 +183,7 @@ python3 -m recipe.one_step_off_policy.main_ppo \
   reward_model.reward_manager=naive \
   trainer.critic_warmup=0 \
   trainer.val_before_train=False \
-  trainer.logger='[\"console\",\"tensorboard\"]' \
+  trainer.logger='["console","tensorboard"]' \
   trainer.project_name="${project_name}" \
   trainer.experiment_name="${exp_name}" \
   trainer.save_freq=0 \
