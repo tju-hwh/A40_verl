@@ -32,6 +32,7 @@ print("qwen14b dynamic modules warmed on node1")
 PY
 
 ray stop --force >/dev/null 2>&1 || true
+pkill -f 'test_qwen8b_2server_hop_dptp_new.py|test_qwen14b_2server_hop_dptp_new.py|launch_dp_tp_cluster|launch_dp_tp_router|kv_owner_state_server:create_app|vllm.entrypoints.openai.api_server|vllm.v1.engine.core' >/dev/null 2>&1 || true
 ray start \
   --address="${NODE0_IP}:${RAY_PORT}" \
   --node-ip-address="${NODE1_IP}"

@@ -102,11 +102,17 @@ class OneStepOffAgentLoopManager(AgentLoopManager):
         metrics = [output.meta_info.pop("metrics") for output in outputs]
         timing = self._performance_metrics(metrics, output)
         output.meta_info = {"timing": timing, **outputs[0].meta_info}
-        if stream_queue is not None and stream_end_token is not None:
+        if (
+            stream_queue is not None
+            and stream_end_token is not None
+            and self.config.actor_rollout_ref.rollout.free_cache_engine
+        ):
             # 只发送一个结束符，避免多 worker 重复
             await asyncio.to_thread(stream_queue.put, stream_end_token)
             global_steps = int(prompts.meta_info.get("global_steps", -1))
             asyncio.create_task(self._clear_kv_cache_background(global_steps))
+        elif stream_queue is not None and stream_end_token is not None:
+            await asyncio.to_thread(stream_queue.put, stream_end_token)
         return output
 
     async def wake_up(self):

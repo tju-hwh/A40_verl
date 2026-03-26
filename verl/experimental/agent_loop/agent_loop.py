@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import asyncio
+import inspect
 import heapq
 import logging
 import os
@@ -799,7 +800,9 @@ class AgentLoopManager:
 
         # Initially we're in sleep mode.
         if self.config.actor_rollout_ref.rollout.free_cache_engine:
-            self.sleep()
+            sleep_result = self.sleep()
+            if inspect.isawaitable(sleep_result):
+                asyncio.run(sleep_result)
 
     def _initialize_llm_servers(self):
         rollout_world_size = (

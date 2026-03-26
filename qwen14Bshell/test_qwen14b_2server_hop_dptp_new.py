@@ -29,6 +29,8 @@ def _inject_defaults(argv: list[str]) -> list[str]:
             out.extend([flag, value])
 
     _add_default("--model-path", "/root/model/Qwen-14B")
+    if "--trust-remote-code" not in out:
+        out.append("--trust-remote-code")
     _add_default("--runtime-dir",
                  "/tmp/qwen14b_2server_hop_dptp_serve"
                  if "--serve-only" in out else
