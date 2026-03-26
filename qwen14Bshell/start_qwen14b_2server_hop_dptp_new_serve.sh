@@ -8,6 +8,7 @@ NODE_IP="${NODE_IP:?set NODE_IP to this machine IP}"
 CUDA_VISIBLE_DEVICES_LOCAL="${CUDA_VISIBLE_DEVICES_LOCAL:-0,1,2,3,4,5,6,7}"
 MODEL_PATH="${MODEL_PATH:-/root/model/Qwen-14B}"
 PYTHON_BIN="${PYTHON_BIN:-/root/anaconda3/envs/verl/bin/python}"
+HF_MODULES_CACHE="${HF_MODULES_CACHE:-/root/.cache/huggingface/modules}"
 
 DP_SIZE="${DP_SIZE:-2}"
 TP_SIZE="${TP_SIZE:-4}"
@@ -35,6 +36,7 @@ CONSUMER_COMPILATION_CONFIG="${CONSUMER_COMPILATION_CONFIG:-{\"level\":3,\"use_i
 RUNTIME_DIR="${RUNTIME_DIR:-/tmp/qwen14b_2server_hop_dptp_${NODE_IP//./_}}"
 
 cd /root
+export HF_MODULES_CACHE
 
 cmd=(
   python /root/A40_verl/qwen14Bshell/test_qwen14b_2server_hop_dptp_new.py

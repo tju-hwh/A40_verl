@@ -21,6 +21,7 @@ exp_name="${EXP_NAME:-deepmath-qwen14b-hop-dp2tp4-newbatch-2node16gpu}"
 MODEL_PATH="${MODEL_PATH:-/root/model/Qwen-14B}"
 TRUST_REMOTE_CODE="${TRUST_REMOTE_CODE:-true}"
 CHAT_TEMPLATE_FILE="${CHAT_TEMPLATE_FILE:-/root/A40_verl/qwen14Bshell/qwen_chat_template.jinja}"
+HF_MODULES_CACHE="${HF_MODULES_CACHE:-/root/.cache/huggingface/modules}"
 TRAIN_FILE="${TRAIN_FILE:-/root/data/deepmath/train.parquet}"
 TEST_FILE="${TEST_FILE:-/root/data/deepmath/test.parquet}"
 CKPTS_DIR="${CKPTS_DIR:-/root/A40_verl/ckpts/${project_name}/${exp_name}}"
@@ -107,6 +108,18 @@ export NCCL_DEBUG=WARN
 export TORCH_NCCL_HIGH_PRIORITY=1
 export CUDA_MPS_ACTIVE_THREAD_PERCENTAGE="${ACTOR_MPS_ACTIVE_THREAD_PERCENTAGE}"
 export RAY_ACCEL_ENV_VAR_OVERRIDE_ON_ZERO=0
+export HF_MODULES_CACHE
+
+python3 - <<'PY'
+from transformers import AutoConfig, AutoTokenizer
+from transformers.dynamic_module_utils import get_cached_module_file
+p="/root/model/Qwen-14B"
+AutoTokenizer.from_pretrained(p, trust_remote_code=True)
+AutoConfig.from_pretrained(p, trust_remote_code=True)
+get_cached_module_file(p, "configuration_qwen.py")
+get_cached_module_file(p, "modeling_qwen.py")
+print("qwen14b dynamic modules warmed on trainer head")
+PY
 
 echo "Waiting for Ray cluster to have ${EXPECTED_NODES} nodes..."
 for _ in $(seq 1 60); do
@@ -210,6 +223,7 @@ python3 -m recipe.one_step_off_policy.main_ppo \
   "+trainer.stream_train_pipe=False" \
   "+ray_kwargs.ray_init.address=${RAY_ADDRESS}" \
   "+ray_kwargs.ray_init.runtime_env.env_vars.TRAIN_GROUP_PLAN_HEX=${TRAIN_GROUP_PLAN_HEX}" \
+  "+ray_kwargs.ray_init.runtime_env.env_vars.HF_MODULES_CACHE=${HF_MODULES_CACHE}" \
   rollout.nnodes="${NNODES}" \
   rollout.n_gpus_per_node="${NGPUS_PER_NODE}" \
   "$@"

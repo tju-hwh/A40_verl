@@ -12,9 +12,22 @@ RUNTIME_DIR="${RUNTIME_DIR:-/tmp/qwen14b_2server_hop_dptp_172_24_79_15}"
 RAY_PORT="${RAY_PORT:-6379}"
 RAY_DASHBOARD_PORT="${RAY_DASHBOARD_PORT:-8265}"
 ETH_IFNAMES="${ETH_IFNAMES:-eth0,eth1,eth2,eth3}"
+HF_MODULES_CACHE="${HF_MODULES_CACHE:-/root/.cache/huggingface/modules}"
 
 export NCCL_SOCKET_IFNAME="${ETH_IFNAMES}"
 export GLOO_SOCKET_IFNAME="${ETH_IFNAMES}"
+export HF_MODULES_CACHE
+
+python - <<'PY'
+from transformers import AutoConfig, AutoTokenizer
+from transformers.dynamic_module_utils import get_cached_module_file
+p="/root/model/Qwen-14B"
+AutoTokenizer.from_pretrained(p, trust_remote_code=True)
+AutoConfig.from_pretrained(p, trust_remote_code=True)
+get_cached_module_file(p, "configuration_qwen.py")
+get_cached_module_file(p, "modeling_qwen.py")
+print("qwen14b dynamic modules warmed on node0")
+PY
 
 ray stop --force >/dev/null 2>&1 || true
 ray start \
