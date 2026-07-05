@@ -532,6 +532,13 @@ class RayWorkerGroup(WorkerGroup):
             "MASTER_ADDR": self._master_addr,
             "MASTER_PORT": self._master_port,
         }
+        for key in (
+            "SGLANG_ENABLE_TP_MEMORY_INBALANCE_CHECK",
+            "SGLANG_DISABLE_TP_MEMORY_INBALANCE_CHECK",
+            "SGL_DISABLE_TP_MEMORY_INBALANCE_CHECK",
+        ):
+            if os.environ.get(key) is not None:
+                env_vars[key] = os.environ[key]
         if worker_env is not None:
             logging.debug(f"Appending ray class env, origin: {env_vars}, customized env: {worker_env}")
             conflict_env_vars = set(env_vars.keys()) & set(worker_env.keys())

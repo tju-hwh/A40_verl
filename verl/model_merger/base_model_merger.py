@@ -23,12 +23,14 @@ from accelerate import init_empty_weights
 from transformers import (
     AutoConfig,
     AutoModelForCausalLM,
+    AutoModelForImageTextToText,
     AutoModelForTokenClassification,
-    AutoModelForVision2Seq,
     GenerationConfig,
 )
 
 from verl.utils import hf_processor, hf_tokenizer
+
+AutoModelForVision2Seq = AutoModelForImageTextToText
 
 
 def parse_args():

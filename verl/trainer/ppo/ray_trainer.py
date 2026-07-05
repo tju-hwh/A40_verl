@@ -1093,6 +1093,26 @@ class RayPPOTrainer:
                     batch = batch.repeat(repeat_times=self.config.actor_rollout_ref.rollout.n, interleave=True)
                     batch = batch.union(gen_batch_output)
 
+                    rollout_cfg = self.config.actor_rollout_ref.rollout
+                    if (
+                        rollout_cfg.get("rollpacker_enable", False)
+                        and rollout_cfg.get("rollpacker_filter_aborted", True)
+                        and "rollpacker_accepted" in batch.batch.keys()
+                    ):
+                        accepted_mask = batch.batch["rollpacker_accepted"].bool()
+                        issued_count = int(accepted_mask.numel())
+                        accepted_count = int(accepted_mask.sum().item())
+                        aborted_count = issued_count - accepted_count
+                        batch = batch.select_idxs(accepted_mask.cpu())
+                        batch.batch.pop("rollpacker_accepted")
+                        metrics.update(
+                            {
+                                "rollpacker/issued": issued_count,
+                                "rollpacker/accepted": accepted_count,
+                                "rollpacker/aborted": aborted_count,
+                            }
+                        )
+
                     if "response_mask" not in batch.batch.keys():
                         batch.batch["response_mask"] = compute_response_mask(batch)
                     # Balance the number of valid tokens across DP ranks.

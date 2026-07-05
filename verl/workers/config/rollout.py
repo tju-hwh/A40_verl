@@ -131,6 +131,14 @@ class RolloutConfig(BaseConfig):
     # Abort remaining requests when (1 - over_sample_rate) * total_requests are completed.
     over_sample_rate: float = 0.0
 
+    # Enable RollPacker-style single-turn SGLang rollout.
+    # The rollout sends the oversampled batch as independent requests, returns
+    # after (1 - over_sample_rate) * total_requests finish, and aborts the rest.
+    rollpacker_enable: bool = False
+
+    # Drop aborted/padded RollPacker samples before reward and training.
+    rollpacker_filter_aborted: bool = True
+
     prompt_length: int = 512
     response_length: int = 512
 

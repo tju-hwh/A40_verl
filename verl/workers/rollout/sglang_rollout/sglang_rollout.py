@@ -16,6 +16,7 @@
 from __future__ import annotations
 
 import asyncio
+import importlib.metadata
 import logging
 import multiprocessing as mp
 import os
@@ -23,6 +24,13 @@ from copy import deepcopy
 from json import JSONDecodeError
 from typing import Any, Generator, Optional
 from uuid import uuid4
+
+# SGLang >=0.5 uses SGLANG_ENABLE_TP_MEMORY_INBALANCE_CHECK. The old
+# disable-style variables are converted into the new enable-style variable
+# during SGLang import, so remove them before importing any SGLang module.
+os.environ.pop("SGL_DISABLE_TP_MEMORY_INBALANCE_CHECK", None)
+os.environ.pop("SGLANG_DISABLE_TP_MEMORY_INBALANCE_CHECK", None)
+os.environ.setdefault("SGLANG_ENABLE_TP_MEMORY_INBALANCE_CHECK", "false")
 
 import numpy as np
 import ray
@@ -38,11 +46,11 @@ from sglang.srt.sampling.sampling_params import SamplingParams
 from sglang.srt.server_args import ServerArgs
 from sglang.srt.utils import (
     assert_pkg_version,
-    get_open_port,
     is_cuda,
     set_prometheus_multiproc_dir,
     set_ulimit,
 )
+from sglang.srt.utils.network import get_open_port
 from sglang.srt.weight_sync.utils import update_weights as sgl_update_weights
 from tensordict import TensorDict
 from torch.distributed.device_mesh import DeviceMesh, init_device_mesh
@@ -86,7 +94,10 @@ except ImportError:
 try:
     from sglang.srt.utils import get_ip
 except ImportError:
-    from sglang.srt.utils import get_local_ip_auto as get_ip
+    try:
+        from sglang.srt.utils import get_local_ip_auto as get_ip
+    except ImportError:
+        from sglang.srt.utils.network import get_local_ip_auto as get_ip
 
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
@@ -117,11 +128,14 @@ def _set_envs_and_config(server_args: ServerArgs):
             "Please uninstall the old version and reinstall the latest version by following the instructions at https://docs.flashinfer.ai/installation.html.",
         )
     if is_cuda():
-        assert_pkg_version(
-            "sgl-kernel",
-            "0.1.1",
-            "Please reinstall the latest version with `pip install sgl-kernel --force-reinstall`",
-        )
+        try:
+            importlib.metadata.version("sglang-kernel")
+        except importlib.metadata.PackageNotFoundError:
+            assert_pkg_version(
+                "sgl-kernel",
+                "0.1.1",
+                "Please reinstall the latest version with `pip install sgl-kernel --force-reinstall`",
+            )
 
     # Set mp start method
     mp.set_start_method("spawn", force=True)
@@ -446,6 +460,7 @@ class SGLangRollout(BaseRollout):
                 "model_path": actor_module,
                 "dtype": self.config.dtype,
                 "mem_fraction_static": self.config.gpu_memory_utilization,
+                "context_length": self.config.max_model_len,
                 "enable_memory_saver": True,
                 "base_gpu_id": 0,
                 "gpu_id_step": 1,
@@ -475,6 +490,7 @@ class SGLangRollout(BaseRollout):
                 "skip_tokenizer_init": self.config.skip_tokenizer_init,
                 "dist_timeout": 1800,
             }
+            args.update(engine_kwargs)
 
             if is_server_mode:
                 # add server specific args
@@ -596,6 +612,8 @@ class SGLangRollout(BaseRollout):
         """
         if self.config.multi_turn.enable:
             return self._req_level_generate_sequences(prompts, **kwargs)
+        if self.config.rollpacker_enable and not prompts.meta_info.get("validate", False):
+            return self._rollpacker_generate_sequences(prompts, **kwargs)
         return self._batch_level_generate_sequences(prompts, **kwargs)
 
     @GPUMemoryLogger(role="sglang rollout", logger=logger)
@@ -806,6 +824,190 @@ class SGLangRollout(BaseRollout):
         if self.config.calculate_log_probs:
             # we will recompute old log prob with actor
             batch["rollout_log_probs"] = rollout_log_probs
+
+        return DataProto(batch=batch, non_tensor_batch=non_tensor_batch)
+
+    @GPUMemoryLogger(role="sglang rollout rollpacker", logger=logger)
+    @torch.no_grad()
+    def _rollpacker_generate_sequences(self, prompts: DataProto, **kwargs) -> DataProto:
+        """Single-turn RollPacker rollout.
+
+        The trainer can oversample the prompt batch before this method. This
+        method sends each repeated prompt as an independent SGLang request,
+        waits for the target number of requests to complete, then aborts the
+        remaining long-tail requests. Aborted requests are returned as zero-mask
+        padding rows so the tensor shape remains aligned with the input batch;
+        the trainer may filter them before reward/training.
+        """
+        idx = prompts.batch["input_ids"]
+        attention_mask = prompts.batch["attention_mask"]
+        position_ids = prompts.batch["position_ids"]
+        eos_token_id = prompts.meta_info["eos_token_id"]
+        batch_size = idx.size(0)
+
+        non_tensor_batch = prompts.non_tensor_batch
+        if "raw_prompt_ids" not in non_tensor_batch:
+            non_tensor_batch["raw_prompt_ids"] = np.array(
+                [_pre_process_inputs(self.pad_token_id, idx[i]).tolist() for i in range(batch_size)],
+                dtype=object,
+            )
+
+        if "multi_modal_data" in non_tensor_batch:
+            raw_prompt_ids = non_tensor_batch.pop("raw_prompt_ids")
+            multi_modal_data_list = non_tensor_batch.pop("multi_modal_data")
+            idx_list = [list(x) for x in raw_prompt_ids]
+            image_list = [
+                data.get("image", None) if isinstance(data, dict) else None
+                for data in multi_modal_data_list
+            ]
+        else:
+            idx_list = [list(x) for x in non_tensor_batch.pop("raw_prompt_ids")]
+            image_list = [None] * len(idx_list)
+
+        do_sample = prompts.meta_info.get("do_sample", True)
+        request_sampling_params = self.sampling_params.copy()
+        if not do_sample:
+            request_sampling_params.update(
+                {
+                    "n": 1,
+                    "presence_penalty": 0.0,
+                    "frequency_penalty": 0.0,
+                    "repetition_penalty": 1.0,
+                    "temperature": 0,
+                    "top_p": 1,
+                    "top_k": -1,
+                    "ignore_eos": False,
+                    "min_new_tokens": 0,
+                    "max_new_tokens": self.config.response_length,
+                    "skip_special_tokens": True,
+                    "spaces_between_special_tokens": True,
+                }
+            )
+        request_sampling_params.update(kwargs)
+        request_sampling_params["n"] = 1
+
+        target_completion = int(batch_size * (1 - self.config.over_sample_rate))
+        target_completion = max(1, min(batch_size, target_completion))
+
+        async def run_rollpacker():
+            outputs: list[Any] = [None] * batch_size
+            completed = 0
+
+            async def generate_one(i: int):
+                result = await self._engine.async_generate(
+                    prompt=None,
+                    sampling_params=request_sampling_params,
+                    return_logprob=True,
+                    input_ids=idx_list[i],
+                    image_data=image_list[i],
+                )
+                return i, result
+
+            tasks = [asyncio.create_task(generate_one(i)) for i in range(batch_size)]
+            try:
+                for done_task in asyncio.as_completed(tasks):
+                    try:
+                        task_idx, result = await done_task
+                    except asyncio.CancelledError:
+                        continue
+                    except Exception as exc:  # noqa: BLE001
+                        logger.warning("RollPacker request failed: %s", exc)
+                        continue
+                    outputs[task_idx] = result
+                    completed += 1
+                    if completed >= target_completion:
+                        break
+            finally:
+                for task in tasks:
+                    if not task.done():
+                        task.cancel()
+                await self._engine.abort_request(abort_all=True)
+                await asyncio.gather(*tasks, return_exceptions=True)
+            return outputs
+
+        if self._tp_rank == 0:
+            loop = asyncio.get_event_loop()
+            output = loop.run_until_complete(run_rollpacker())
+        else:
+            output = None
+
+        dist.barrier()
+        if self._engine is not None and self._tp_rank == 0:
+            loop = asyncio.get_event_loop()
+            loop.run_until_complete(self._engine.flush_cache())
+
+        [output] = broadcast_pyobj(
+            data=[output],
+            rank=self._rank,
+            dist_group=self._device_mesh_cpu["tp"].get_group(),
+            src=self._device_mesh_cpu["tp"].mesh[0].item(),
+            force_cpu_device=False,
+        )
+
+        response_rows = []
+        response_masks = []
+        rollout_logprob_rows = []
+        rollpacker_accepted = []
+        for resp in output:
+            if isinstance(resp, list):
+                resp = resp[0] if resp else None
+            if resp is None:
+                token_ids = []
+                log_probs = []
+                rollpacker_accepted.append(False)
+            else:
+                token_ids = resp.get("output_ids") or resp.get("meta_info", {}).get("output_token_ids") or []
+                logprob_tuples = resp.get("meta_info", {}).get("output_token_logprobs") or []
+                log_probs = [x[0] for x in logprob_tuples]
+                rollpacker_accepted.append(True)
+
+            token_tensor = torch.tensor(token_ids[: self.config.response_length], dtype=idx.dtype, device=idx.device)
+            if token_tensor.numel() < self.config.response_length:
+                token_tensor = pad_sequence_to_length(token_tensor.unsqueeze(0), self.config.response_length, self.pad_token_id).squeeze(0)
+            response_rows.append(token_tensor)
+
+            mask = get_response_mask(
+                response_id=token_tensor.unsqueeze(0),
+                eos_token=eos_token_id,
+                dtype=attention_mask.dtype,
+            ).squeeze(0)
+            if not rollpacker_accepted[-1]:
+                mask = torch.zeros_like(mask)
+            response_masks.append(mask)
+
+            if self.config.calculate_log_probs:
+                logprob_tensor = torch.tensor(log_probs[: self.config.response_length], dtype=torch.float32, device=idx.device)
+                if logprob_tensor.numel() < self.config.response_length:
+                    logprob_tensor = pad_sequence_to_length(logprob_tensor.unsqueeze(0), self.config.response_length, 0.0).squeeze(0)
+                rollout_logprob_rows.append(logprob_tensor)
+
+        response = torch.stack(response_rows, dim=0)
+        response_attention_mask = torch.stack(response_masks, dim=0)
+        seq = torch.cat([idx, response], dim=-1)
+
+        response_length = response.size(1)
+        delta_position_id = torch.arange(1, response_length + 1, device=position_ids.device)
+        delta_position_id = delta_position_id.unsqueeze(0).repeat(batch_size, 1)
+        if position_ids.dim() == 3:
+            delta_position_id = delta_position_id.view(batch_size, 1, -1).expand(batch_size, position_ids.size(1), -1)
+        response_position_ids = position_ids[..., -1:] + delta_position_id
+        position_ids = torch.cat([position_ids, response_position_ids], dim=-1)
+        attention_mask = torch.cat((attention_mask, response_attention_mask), dim=-1)
+
+        batch = TensorDict(
+            {
+                "prompts": idx,
+                "responses": response,
+                "input_ids": seq,
+                "attention_mask": attention_mask,
+                "position_ids": position_ids,
+                "response_mask": response_attention_mask,
+                "rollpacker_accepted": torch.tensor(rollpacker_accepted, dtype=torch.bool, device=idx.device),
+            },
+            batch_size=batch_size,
+        )
+        if self.config.calculate_log_probs:
+            batch["rollout_log_probs"] = torch.stack(rollout_logprob_rows, dim=0)
 
         return DataProto(batch=batch, non_tensor_batch=non_tensor_batch)
 
